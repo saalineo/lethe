@@ -4,33 +4,28 @@ use libc::{
 };
 use std::ffi::CString;
 use std::fs;
-// use std::process;
 use std::ptr;
 
 pub fn isolate_environment() -> Result<(), &'static str> {
+    // SAFETY: Querying thread-safe OS uid/gid.
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
+    // SAFETY: Process isolation via unshare syscalls and namespace mounting.
     unsafe {
         if unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0 {
             return Err("Capability cap_sys_admin missing (failed unshare)");
         }
 
-        fs::write("/proc/self/setgroups", b"deny").ok();
+        let _ = fs::write("/proc/self/setgroups", b"deny");
 
-        let mut uid_buf = [0u8; 64];
-        let mut uid_cursor = std::io::Cursor::new(&mut uid_buf[..]);
-        std::io::Write::write_fmt(&mut uid_cursor, format_args!("0 {} 1", uid)).ok();
-        let uid_len = uid_cursor.position() as usize;
-        fs::write("/proc/self/uid_map", &uid_buf[..uid_len]).ok();
+        let uid_str = format!("0 {} 1", uid);
+        let _ = fs::write("/proc/self/uid_map", uid_str.as_bytes());
 
-        let mut gid_buf = [0u8; 64];
-        let mut gid_cursor = std::io::Cursor::new(&mut gid_buf[..]);
-        std::io::Write::write_fmt(&mut gid_cursor, format_args!("0 {} 1", gid)).ok();
-        let gid_len = gid_cursor.position() as usize;
-        fs::write("/proc/self/gid_map", &gid_buf[..gid_len]).ok();
+        let gid_str = format!("0 {} 1", gid);
+        let _ = fs::write("/proc/self/gid_map", gid_str.as_bytes());
 
-        let root = CString::new("/").unwrap();
+        let root = CString::new("/").map_err(|_| "Invalid root path")?;
         if mount(
             ptr::null(),
             root.as_ptr(),
@@ -42,8 +37,8 @@ pub fn isolate_environment() -> Result<(), &'static str> {
             return Err("Failed to mount private root");
         }
 
-        let tmp_path = CString::new("/tmp").unwrap();
-        let tmpfs = CString::new("tmpfs").unwrap();
+        let tmp_path = CString::new("/tmp").map_err(|_| "Invalid tmp path")?;
+        let tmpfs = CString::new("tmpfs").map_err(|_| "Invalid tmpfs name")?;
         let flags = MS_NOSUID | MS_NOEXEC | MS_NODEV;
 
         mount(
@@ -54,8 +49,8 @@ pub fn isolate_environment() -> Result<(), &'static str> {
             ptr::null(),
         );
 
-        let proc_path = CString::new("/proc").unwrap();
-        let proc_fs = CString::new("proc").unwrap();
+        let proc_path = CString::new("/proc").map_err(|_| "Invalid proc path")?;
+        let proc_fs = CString::new("proc").map_err(|_| "Invalid proc fs name")?;
 
         umount2(proc_path.as_ptr(), MNT_DETACH);
         mount(

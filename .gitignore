@@ -1,16 +1,70 @@
-# Compiled Object files, Static and Dynamic libs (Shared Architecture)
+# ==============================================================================
+# SIRFZ .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Rust Build Artifacts & Cargo Target Directories
+# ------------------------------------------------------------------------------
+/target/
+**/target/
+Cargo.lock
+client/Cargo.lock
+libtransport/Cargo.lock
+**/*.rs.bk
+
+# ------------------------------------------------------------------------------
+# 2. Binary Executables & Shared / Static Libraries
+# ------------------------------------------------------------------------------
 *.o
 *.a
 *.so
+*.so.*
 *.dylib
 *.dll
+*.exe
+*.out
+libsirfz.so
+libtransport.so
 
-# Rust build artifacts
-/client/target/
-/libtransport/target/
-**/*.rs.bk
+# ------------------------------------------------------------------------------
+# 3. Secrets, Keys, Credentials & Environment Files
+# ------------------------------------------------------------------------------
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.asc
+*.sig
+secrets/
+private/
+credentials.json
+id_rsa*
+id_ed25519*
 
-# OS generated files
+# ------------------------------------------------------------------------------
+# 4. IDEs, Editors & Developer Tooling
+# ------------------------------------------------------------------------------
+.idea/
+.vscode/
+.zed/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+.vs/
+*.user
+doc/
+
+# ------------------------------------------------------------------------------
+# 5. OS & System Generated Files
+# ------------------------------------------------------------------------------
 .DS_Store
 .DS_Store?
 ._*
@@ -19,8 +73,11 @@
 ehthumbs.db
 Thumbs.db
 
-# IDEs
-.idea/
-.vscode/
-*.swp
-*.swo
+# ------------------------------------------------------------------------------
+# 6. Logs, Temporary Files & Scratch Space
+# ------------------------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+scratch/
+tmp/

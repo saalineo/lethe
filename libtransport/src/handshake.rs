@@ -14,43 +14,54 @@ pub fn client(stream: &mut TcpStream, auth_key: &[u8; 32]) -> io::Result<()> {
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
     let mut nonce = [0u8; 32];
-    getrandom::getrandom(&mut nonce).map_err(|_| io::Error::new(io::ErrorKind::Other, "rng failure"))?;
-
-    let mut mac = HmacSha256::new_from_slice(auth_key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    mac.update(&nonce);
-    let signature = mac.finalize().into_bytes();
-
     let mut payload = [0u8; 64];
-    payload[..32].copy_from_slice(&nonce);
-    payload[32..].copy_from_slice(&signature);
 
-    stream.write_all(&payload)?;
-    stream.flush()?;
+    let result = (|| {
+        getrandom::getrandom(&mut nonce)
+            .map_err(|_| io::Error::other("rng failure"))?;
+
+        let mut mac = HmacSha256::new_from_slice(auth_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        mac.update(&nonce);
+        let signature = mac.finalize().into_bytes();
+
+        payload[..32].copy_from_slice(&nonce);
+        payload[32..].copy_from_slice(&signature);
+
+        stream.write_all(&payload)?;
+        stream.flush()?;
+        Ok(())
+    })();
 
     nonce.zeroize();
+    payload.zeroize();
+    let _ = stream.set_write_timeout(None);
 
-    stream.set_write_timeout(None)?;
-    Ok(())
+    result
 }
 
 pub fn server(stream: &mut TcpStream, auth_key: &[u8; 32]) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
     let mut payload = [0u8; 64];
-    stream.read_exact(&mut payload)?;
 
-    let nonce = &payload[..32];
-    let signature = &payload[32..];
+    let result = (|| {
+        stream.read_exact(&mut payload)?;
 
-    let mut mac = HmacSha256::new_from_slice(auth_key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    mac.update(nonce);
+        let nonce = &payload[..32];
+        let signature = &payload[32..];
 
-    mac.verify_slice(signature)
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "invalid auth"))?;
+        let mut mac = HmacSha256::new_from_slice(auth_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        mac.update(nonce);
+
+        mac.verify_slice(signature)
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "invalid auth"))?;
+        Ok(())
+    })();
 
     payload.zeroize();
-    stream.set_read_timeout(None)?;
-    Ok(())
+    let _ = stream.set_read_timeout(None);
+
+    result
 }

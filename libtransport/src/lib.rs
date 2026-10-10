@@ -4,7 +4,6 @@ use std::ffi::CStr;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_int, c_uchar};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroize;
@@ -13,38 +12,42 @@ const BUF_SIZE: usize = 32 * 1024;
 const MAX_HANDLES: usize = 64;
 
 static HANDLES: Mutex<Vec<Option<Arc<Mutex<TcpStream>>>>> = Mutex::new(Vec::new());
-static HANDLE_SEQ: AtomicI32 = AtomicI32::new(0);
 
 fn alloc_handle(stream: TcpStream) -> c_int {
     let stream = Arc::new(Mutex::new(stream));
-    let mut handles = HANDLES.lock().unwrap();
-    let idx = HANDLE_SEQ.fetch_add(1, Ordering::Relaxed) as usize % MAX_HANDLES;
-    if idx < handles.len() && handles[idx].is_some() {
-        for i in 0..handles.len() {
-            if handles[i].is_none() {
-                handles[i] = Some(Arc::clone(&stream));
-                return i as c_int;
-            }
+    let mut handles = match HANDLES.lock() {
+        Ok(h) => h,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    for (i, slot) in handles.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(stream);
+            return i as c_int;
         }
     }
-    if idx >= handles.len() {
-        handles.resize_with(idx + 1, || None);
+
+    if handles.len() >= MAX_HANDLES {
+        return -1;
     }
-    handles[idx] = Some(stream);
-    idx as c_int
+
+    handles.push(Some(stream));
+    (handles.len() - 1) as c_int
 }
 
 fn free_handle(handle: c_int) {
     if handle < 0 {
         return;
     }
-    let mut handles = HANDLES.lock().unwrap();
-    if let Some(slot) = handles.get_mut(handle as usize) {
-        if let Some(stream) = slot.take() {
-            if let Ok(s) = stream.lock() {
-                let _ = s.shutdown(Shutdown::Both);
-            }
-        }
+    let mut handles = match HANDLES.lock() {
+        Ok(h) => h,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(slot) = handles.get_mut(handle as usize)
+        && let Some(stream) = slot.take()
+        && let Ok(s) = stream.lock()
+    {
+        let _ = s.shutdown(Shutdown::Both);
     }
 }
 
@@ -59,7 +62,7 @@ where
     let slot = handles.get(handle as usize)?;
     let stream = slot.as_ref()?;
     let mut guard = stream.lock().ok()?;
-    Some(f(&mut *guard))
+    Some(f(&mut guard))
 }
 
 fn send_frame(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
@@ -86,41 +89,85 @@ fn recv_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> &'a str {
-    CStr::from_ptr(ptr).to_str().unwrap_or("0.0.0.0:9000")
+/// Convert a C string pointer to a Rust `&str` reference.
+///
+/// # Safety
+///
+/// `ptr` must be a valid null-terminated C string or null.
+unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Caller guarantees `ptr` points to a valid null-terminated C string.
+    unsafe { CStr::from_ptr(ptr).to_str().ok() }
 }
 
-unsafe fn slice_from_ptr<'a>(ptr: *const c_uchar, len: usize) -> &'a [u8] {
-    std::slice::from_raw_parts(ptr, len)
+/// Create a byte slice from a raw pointer and length safely.
+///
+/// # Safety
+///
+/// `ptr` must point to `len` initialized, readable bytes if `len > 0`.
+unsafe fn slice_from_ptr<'a>(ptr: *const c_uchar, len: usize) -> Option<&'a [u8]> {
+    if ptr.is_null() && len > 0 {
+        return None;
+    }
+    if len == 0 {
+        return Some(&[]);
+    }
+    // SAFETY: Caller guarantees `ptr` points to `len` readable bytes.
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
-unsafe fn slice_from_ptr_mut<'a>(ptr: *mut c_uchar, len: usize) -> &'a mut [u8] {
-    std::slice::from_raw_parts_mut(ptr, len)
+/// Create a mutable byte slice from a raw pointer and length safely.
+///
+/// # Safety
+///
+/// `ptr` must point to `len` initialized, writable bytes if `len > 0`.
+unsafe fn slice_from_ptr_mut<'a>(ptr: *mut c_uchar, len: usize) -> Option<&'a mut [u8]> {
+    if ptr.is_null() && len > 0 {
+        return None;
+    }
+    if len == 0 {
+        return Some(&mut []);
+    }
+    // SAFETY: Caller guarantees `ptr` points to `len` writable bytes.
+    Some(unsafe { std::slice::from_raw_parts_mut(ptr, len) })
 }
 
-#[no_mangle]
+/// Start a transport node (server or client).
+///
+/// # Safety
+///
+/// - `addr` must be a valid null-terminated C string pointer.
+/// - `auth_key` must point to a 32-byte authorization key buffer.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn StartNode(
     is_server: c_int,
     addr: *const c_char,
     auth_key: *const c_uchar,
 ) -> c_int {
-    let addr = cstr_to_str(addr);
-    let auth_key = slice_from_ptr(auth_key, 32);
-    let mut key = [0u8; 32];
-    key.copy_from_slice(auth_key);
+    std::panic::catch_unwind(|| {
+        // SAFETY: Delegating to `cstr_to_str` which verifies nullness.
+        let addr_str = unsafe { cstr_to_str(addr) }.unwrap_or("0.0.0.0:9000");
+        // SAFETY: Delegating to `slice_from_ptr` which verifies nullness.
+        let key_slice = match unsafe { slice_from_ptr(auth_key, 32) } {
+            Some(s) => s,
+            None => return -1,
+        };
 
-    let result = if is_server != 0 {
-        start_server(addr, &key)
-    } else {
-        start_client(addr, &key)
-    };
+        let mut key = [0u8; 32];
+        key.copy_from_slice(key_slice);
 
-    key.zeroize();
+        let result = if is_server != 0 {
+            start_server(addr_str, &key)
+        } else {
+            start_client(addr_str, &key)
+        };
 
-    match result {
-        Ok(handle) => handle,
-        Err(_) => -1,
-    }
+        key.zeroize();
+        result.unwrap_or(-1)
+    })
+    .unwrap_or(-1)
 }
 
 fn start_server(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
@@ -130,58 +177,117 @@ fn start_server(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
     let (mut stream, _) = listener.accept()?;
     handshake::server(&mut stream, auth_key)?;
 
-    Ok(alloc_handle(stream))
+    let handle = alloc_handle(stream);
+    if handle < 0 {
+        Err(io::Error::other("handle allocation failed"))
+    } else {
+        Ok(handle)
+    }
 }
 
 fn start_client(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
     let mut stream = TcpStream::connect(addr)?;
     handshake::client(&mut stream, auth_key)?;
 
-    Ok(alloc_handle(stream))
+    let handle = alloc_handle(stream);
+    if handle < 0 {
+        Err(io::Error::other("handle allocation failed"))
+    } else {
+        Ok(handle)
+    }
 }
 
-#[no_mangle]
+/// Send a frame of data over the given node handle.
+///
+/// # Safety
+///
+/// `data` must point to `length` valid readable bytes.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn SendMessage(
     handle: c_int,
     data: *const c_uchar,
     length: c_int,
 ) -> c_int {
-    if length < 0 {
-        return -1;
-    }
-    let buf = slice_from_ptr(data, length as usize);
-    let ok = with_stream(handle, |stream| send_frame(stream, buf).is_ok());
-    match ok {
-        Some(true) => length,
-        _ => -1,
-    }
+    std::panic::catch_unwind(|| {
+        if length < 0 {
+            return -1;
+        }
+        // SAFETY: Delegating to `slice_from_ptr`.
+        let buf = match unsafe { slice_from_ptr(data, length as usize) } {
+            Some(b) => b,
+            None => return -1,
+        };
+        let ok = with_stream(handle, |stream| send_frame(stream, buf).is_ok());
+        if ok == Some(true) {
+            length
+        } else {
+            -1
+        }
+    })
+    .unwrap_or(-1)
 }
 
-#[no_mangle]
+/// Receive a frame of data over the given node handle into `out_buf`.
+///
+/// # Safety
+///
+/// `out_buf` must point to `out_len` valid writable bytes.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn RecvMessage(
     handle: c_int,
     _stream_idx: c_int,
     out_buf: *mut c_uchar,
     out_len: c_int,
 ) -> c_int {
-    if out_len < 0 {
-        return -1;
-    }
-    let dst = slice_from_ptr_mut(out_buf, out_len as usize);
-
-    let result = with_stream(handle, |stream| recv_frame(stream));
-    match result {
-        Some(Ok(mut frame)) => {
-            let n = frame.len().min(dst.len());
-            dst[..n].copy_from_slice(&frame[..n]);
-            frame.zeroize();
-            n as c_int
+    std::panic::catch_unwind(|| {
+        if out_len < 0 {
+            return -1;
         }
-        _ => -1,
+        // SAFETY: Delegating to `slice_from_ptr_mut`.
+        let dst = match unsafe { slice_from_ptr_mut(out_buf, out_len as usize) } {
+            Some(d) => d,
+            None => return -1,
+        };
+
+        let result = with_stream(handle, recv_frame);
+        match result {
+            Some(Ok(mut frame)) => {
+                let n = frame.len().min(dst.len());
+                dst[..n].copy_from_slice(&frame[..n]);
+                frame.zeroize();
+                n as c_int
+            }
+            _ => -1,
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// Stop a transport node and free its resources.
+///
+/// # Safety
+///
+/// `handle` must be a node handle created by `StartNode`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn StopNode(handle: c_int) {
+    let _ = std::panic::catch_unwind(|| {
+        free_handle(handle);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_invalid_handle_ops() {
+        assert_eq!(with_stream(-1, |_| ()), None);
+        assert_eq!(with_stream(999, |_| ()), None);
+        // SAFETY: Invalid handle is gracefully handled.
+        unsafe {
+            StopNode(-1);
+            StopNode(999);
+        }
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn StopNode(handle: c_int) {
-    free_handle(handle);
-}

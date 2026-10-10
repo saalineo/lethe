@@ -7,8 +7,9 @@ pub struct RawTerminal {
 
 impl RawTerminal {
     pub fn enter() -> Self {
+        // SAFETY: zeroed termios initialized before tcgetattr fills it.
+        let mut original: termios = unsafe { std::mem::zeroed() };
         unsafe {
-            let mut original: termios = std::mem::zeroed();
             tcgetattr(STDIN_FILENO, &mut original);
 
             let mut raw = original;
@@ -16,14 +17,15 @@ impl RawTerminal {
             raw.c_cc[libc::VMIN] = 1;
             raw.c_cc[libc::VTIME] = 0;
             tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-
-            Self { original }
         }
+
+        Self { original }
     }
 }
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
+        // SAFETY: Restores saved termios settings.
         unsafe {
             tcsetattr(STDIN_FILENO, TCSANOW, &self.original);
         }

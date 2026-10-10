@@ -8,6 +8,7 @@ pub fn secure_launch<F>(sandbox_payload: F)
 where
     F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
 {
+    // SAFETY: Process fork and ptrace monitoring loop using standard OS APIs.
     unsafe {
         let child_process_id = fork();
 
@@ -51,12 +52,12 @@ where
                                 "\n[!] Watchdog Alert: Child killed by signal {} (security violation)",
                                 sig
                             );
-                            kill(child_process_id, SIGKILL);
+                            let _ = kill(child_process_id, SIGKILL);
                             process::exit(1);
                         }
                         _ => {
                             if ptrace(PTRACE_CONT, child_process_id, 0, sig) < 0 {
-                                kill(child_process_id, SIGKILL);
+                                let _ = kill(child_process_id, SIGKILL);
                                 process::exit(1);
                             }
                         }
@@ -65,7 +66,7 @@ where
                 }
 
                 if ptrace(PTRACE_CONT, child_process_id, 0, 0) < 0 {
-                    kill(child_process_id, SIGKILL);
+                    let _ = kill(child_process_id, SIGKILL);
                     process::exit(1);
                 }
             }

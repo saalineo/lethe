@@ -18,8 +18,10 @@ pub struct LoadedSymbols {
 
 impl LoadedSymbols {
     pub fn open(lib_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // SAFETY: Loading dynamic library from user/config provided path.
         let lib = unsafe { Library::new(lib_path)? };
 
+        // SAFETY: Dereferencing loaded function pointers from dynamic library.
         let start_node: FnStartNode = unsafe {
             let sym: Symbol<FnStartNode> = lib.get(b"StartNode\0")?;
             *sym
@@ -53,6 +55,7 @@ impl LoadedSymbols {
         auth_key: &[u8; 32],
     ) -> Result<i32, Box<dyn std::error::Error>> {
         let c_addr = CString::new(addr)?;
+        // SAFETY: Invoking C function pointer with valid pointer parameters.
         let handle = unsafe {
             (self.start_node)(
                 if is_server { 1 } else { 0 },
@@ -67,27 +70,30 @@ impl LoadedSymbols {
     }
 
     pub fn send(&self, node_handle: c_int, data: &[u8]) -> i32 {
+        // SAFETY: Passing valid slice pointer and length to FFI function.
         unsafe {
             (self.send_message)(
                 node_handle,
-                data.as_ptr() as *const c_uchar,
+                data.as_ptr(),
                 data.len() as c_int,
             )
         }
     }
 
     pub fn recv(&self, node_handle: c_int, stream_idx: i32, buf: &mut [u8]) -> i32 {
+        // SAFETY: Passing valid mutable slice pointer and length to FFI function.
         unsafe {
             (self.recv_message)(
                 node_handle,
-                stream_idx as c_int,
-                buf.as_mut_ptr() as *mut c_uchar,
+                stream_idx,
+                buf.as_mut_ptr(),
                 buf.len() as c_int,
             )
         }
     }
 
     pub fn stop(&self, node_handle: c_int) {
+        // SAFETY: StopNode handle release.
         unsafe { (self.stop_node)(node_handle) }
     }
 }

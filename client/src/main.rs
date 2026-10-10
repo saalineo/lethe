@@ -3,6 +3,7 @@ mod crypto;
 mod ffi;
 mod hardening;
 mod shutdown;
+mod username;
 
 use chat::router::HostRouter;
 use crypto::ratchet::RatchetState;
@@ -32,7 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     anti_debug::block_debugger();
-    dump::disable_core_dumps();
+    if let Err(e) = dump::disable_core_dumps() {
+        eprintln!("[!] Failed to disable core dumps: {}", e);
+    }
 
     watchdog::secure_launch(|| {
         if let Err(e) = namespace::isolate_environment() {
@@ -43,13 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Err(e) = memory::lock_memory() {
-            eprintln!("\x1b[1;31m[!] Memory Lock Failed: {:?}\x1b[0m", e);
+            eprintln!("\x1b[1;31m[!] Memory Lock Failed: {}\x1b[0m", e);
             eprintln!("\x1b[1;33m[i] Missing cap_ipc_lock. Please apply capabilities:\x1b[0m");
             eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/sirfz");
             std::process::exit(1);
         }
-        seccomp::enforce_syscall_boundaries();
-        signals::install_signal_handlers();
+        if let Err(e) = seccomp::enforce_syscall_boundaries() {
+            eprintln!("\x1b[1;31m[!] Seccomp failed: {}\x1b[0m", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = signals::install_signal_handlers() {
+            eprintln!("\x1b[1;31m[!] Signal handlers failed: {}\x1b[0m", e);
+            std::process::exit(1);
+        }
 
         let args: Vec<String> = env::args().collect();
         let is_server = args.iter().any(|a| a == "--server");
@@ -65,7 +74,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .position(|a| a == "--lib")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
-            .unwrap_or("./libtransport.so");
+            .unwrap_or_else(|| {
+                if std::path::Path::new("./libsirfz.so").exists() {
+                    "./libsirfz.so"
+                } else if std::path::Path::new("./libtransport.so").exists() {
+                    "./libtransport.so"
+                } else {
+                    "../libtransport/target/release/libsirfz.so"
+                }
+            });
 
         eprintln!(
             "\x1b[1;30m[+]\x1b[0m \x1b[32m{}\x1b[0m",
@@ -95,11 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth_key.copy_from_slice(&result);
 
             pin.zeroize();
-
             break;
         }
 
         eprintln!("\x1b[1;30m[+]\x1b[0m Session Secured.");
+
+        let my_username = username::generate_username();
+        eprintln!("\n\x1b[1;30m[+]\x1b[0m \x1b[32mAssigned Alias: {}\x1b[0m\n", my_username);
 
         let transport = TransportHandle::load(lib_path, is_server, addr, &auth_key)
             .map_err(|e| format!("transport init failed: {}", e))?;
@@ -109,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let recv_ratchet = Arc::new(Mutex::new(RatchetState::new(root_key)));
 
         let router = HostRouter::new(transport);
-        chat::terminal::run(router, send_ratchet, recv_ratchet);
+        chat::terminal::run(router, send_ratchet, recv_ratchet, my_username);
 
         Ok(())
     });

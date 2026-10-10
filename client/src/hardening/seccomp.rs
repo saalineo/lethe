@@ -1,8 +1,7 @@
 use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall};
 
-pub fn enforce_syscall_boundaries() {
-    let mut isolation_context = ScmpFilterContext::new_filter(ScmpAction::Trap)
-        .expect("Isolation initialization failed");
+pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    let mut isolation_context = ScmpFilterContext::new_filter(ScmpAction::Trap)?;
 
     const PERMITTED_SYSTEM_CALLS: &[i32] = &[
         libc::SYS_read as i32,
@@ -87,10 +86,9 @@ pub fn enforce_syscall_boundaries() {
 
     for &system_call_identifier in PERMITTED_SYSTEM_CALLS {
         let kernel_syscall = ScmpSyscall::from(system_call_identifier);
-        isolation_context
-            .add_rule(ScmpAction::Allow, kernel_syscall)
-            .unwrap_or_else(|_| panic!("Failed to allow syscall ID: {}", system_call_identifier));
+        let _ = isolation_context.add_rule(ScmpAction::Allow, kernel_syscall);
     }
 
-    isolation_context.load().expect("Kernel context switch failed");
+    isolation_context.load()?;
+    Ok(())
 }
