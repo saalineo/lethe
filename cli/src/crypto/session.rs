@@ -55,16 +55,21 @@ pub fn agree<S: Read + Write>(io: &mut S, role: Role, pw: &[u8; 32]) -> io::Resu
 
     type HmacSha256 = Hmac<Sha256>;
 
+    // Cell size, tick and version are part of the transcript: peers with
+    // mismatched parameters fail key agreement instead of desyncing.
+    let id_c = crate::proto::params::bound_identity(b"lethe-client");
+    let id_s = crate::proto::params::bound_identity(b"lethe-server");
+
     let (state, msg) = match role {
         Role::Initiator => Spake2::<Ed25519Group>::start_a(
             &Password::new(pw),
-            &Identity::new(b"lethe-client"),
-            &Identity::new(b"lethe-server"),
+            &Identity::new(&id_c),
+            &Identity::new(&id_s),
         ),
         Role::Responder => Spake2::<Ed25519Group>::start_b(
             &Password::new(pw),
-            &Identity::new(b"lethe-client"),
-            &Identity::new(b"lethe-server"),
+            &Identity::new(&id_c),
+            &Identity::new(&id_s),
         ),
     };
     io.write_all(&msg)?; // msg is 33 bytes
