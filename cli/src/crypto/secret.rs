@@ -57,12 +57,17 @@ impl Drop for SecretBuf {
 /// Global centralized session storage for ZeroizeOnDrop on shutdown (D9).
 pub static SESSION: Mutex<Option<SessionKeys>> = Mutex::new(None);
 
+/// Serialises tests that touch the process-global `SESSION`.
+#[cfg(test)]
+pub static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Stores the active session keys.
 pub fn set_session(keys: SessionKeys) {
     let mut g = SESSION.lock().unwrap_or_else(|p| p.into_inner());
     *g = Some(keys);
 }
 
+#[allow(dead_code)]
 /// Seals (encrypts and authenticates) a message using the active send ratchet chain.
 ///
 /// # Errors
@@ -76,6 +81,7 @@ pub fn seal(pt: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
 }
 
+#[allow(dead_code)]
 /// Opens (authenticates and decrypts) a message using the active recv ratchet chain.
 ///
 /// # Errors
@@ -85,6 +91,28 @@ pub fn open(ct: &[u8]) -> Result<Vec<u8>, &'static str> {
     let mut g = SESSION.lock().unwrap_or_else(|p| p.into_inner());
     match g.as_mut() {
         Some(s) => s.recv.open(ct),
+        None => Err("session not initialized"),
+    }
+}
+
+/// Runs `f` with exclusive access to the send chain (keys stay in `SESSION`).
+pub fn with_send<R>(
+    f: impl FnOnce(&mut crate::crypto::ratchet::Chain) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let mut g = SESSION.lock().unwrap_or_else(|p| p.into_inner());
+    match g.as_mut() {
+        Some(s) => f(&mut s.send),
+        None => Err("session not initialized"),
+    }
+}
+
+/// Runs `f` with exclusive access to the recv chain (keys stay in `SESSION`).
+pub fn with_recv<R>(
+    f: impl FnOnce(&mut crate::crypto::ratchet::Chain) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let mut g = SESSION.lock().unwrap_or_else(|p| p.into_inner());
+    match g.as_mut() {
+        Some(s) => f(&mut s.recv),
         None => Err("session not initialized"),
     }
 }
@@ -122,6 +150,7 @@ mod tests {
 
     #[test]
     fn test_secret_session_lifecycle_and_wipe() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let shared = [0x33u8; 32];
         let client_keys = SessionKeys::from_shared(&shared, Role::Initiator);
         let mut server_keys = SessionKeys::from_shared(&shared, Role::Responder);

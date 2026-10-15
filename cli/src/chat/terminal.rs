@@ -12,6 +12,8 @@ pub fn run(router: HostRouter) {
 
     let _raw = RawTerminal::enter();
 
+    let (queue_tx, queue_rx) = std::sync::mpsc::sync_channel(super::send_loop::QUEUE_DEPTH);
+    super::send_loop::spawn_scheduler(queue_rx, router.transport());
     super::recv_loop::spawn(router.transport(), my_username.clone());
-    super::send_loop::run(&router, &my_username);
+    super::send_loop::run(queue_tx, &my_username);
 }

@@ -12,10 +12,6 @@ impl HostRouter {
         }
     }
 
-    pub fn fan_out(&self, ciphertext: &[u8]) {
-        self.transport.send(ciphertext);
-    }
-
     pub fn transport(&self) -> Arc<TransportHandle> {
         Arc::clone(&self.transport)
     }
