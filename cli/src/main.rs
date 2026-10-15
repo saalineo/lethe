@@ -2,6 +2,7 @@ mod chat;
 mod crypto;
 mod ffi;
 mod hardening;
+mod mode;
 mod proto;
 mod shutdown;
 mod username;
@@ -60,6 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = env::args().collect();
         let is_server = args.iter().any(|a| a == "--server");
 
+        let mode = mode::detect(&args);
+
         let explicit_addr = args
             .iter()
             .position(|a| a == "--addr")
@@ -68,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let addr = if let Some(a) = explicit_addr {
             a.to_string()
-        } else if !username::is_pipe_mode() {
+        } else if mode == mode::Mode::Chat {
             read_address_from_tty(is_server)
         } else if is_server {
             "0.0.0.0:9000".to_string()
