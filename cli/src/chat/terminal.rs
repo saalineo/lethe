@@ -2,7 +2,7 @@ use crate::chat::router::HostRouter;
 use crate::hardening::input::RawTerminal;
 
 pub fn run(router: HostRouter) {
-    let my_username = crate::username::generate_username();
+    let my_username = crate::username::generate_default_username();
     if !crate::username::is_pipe_mode() {
         crate::status_ln!(
             "\n\x1b[1;30m[+]\x1b[0m \x1b[32mAssigned Alias: {}\x1b[0m\n",

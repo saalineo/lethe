@@ -1,6 +1,4 @@
 use rand::seq::SliceRandom;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
 
 /// Detects whether either stdin or stdout is redirected / piped.
 pub fn is_pipe_mode() -> bool {
@@ -8,26 +6,18 @@ pub fn is_pipe_mode() -> bool {
     unsafe { libc::isatty(libc::STDIN_FILENO) == 0 || libc::isatty(libc::STDOUT_FILENO) == 0 }
 }
 
-fn write_tty(msg: &str) {
-    if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
-        let _ = write!(tty, "{}", msg);
-        let _ = tty.flush();
-    }
+/// Terminal access used by the questionnaire (so the UI can supply its own fds).
+pub trait Prompter {
+    fn write(&mut self, s: &str);
+    /// Reads one line without the terminator; `None` on EOF/error.
+    fn read_line(&mut self) -> Option<String>;
 }
 
-fn ask(prompt: &str, valid: &[&str], default: &str) -> String {
-    write_tty(prompt);
-
-    let Ok(tty_in) = File::open("/dev/tty") else {
+fn ask(io: &mut dyn Prompter, prompt: &str, valid: &[&str], default: &str) -> String {
+    io.write(prompt);
+    let Some(input) = io.read_line() else {
         return default.to_string();
     };
-
-    let mut reader = BufReader::new(tty_in);
-    let mut input = String::new();
-    if reader.read_line(&mut input).is_err() {
-        return default.to_string();
-    }
-
     let trimmed = input.trim().to_lowercase();
     if valid.contains(&trimmed.as_str()) {
         trimmed
@@ -42,35 +32,36 @@ pub fn generate_default_username() -> String {
     apply_transformation(&base, "subtle")
 }
 
-pub fn generate_username() -> String {
-    // In pipe modes or during unit tests, skip questions entirely to avoid polluting piped stdout or consuming stdin.
-    if is_pipe_mode() || cfg!(test) {
-        return generate_default_username();
-    }
+/// Interactive alias questionnaire over the given terminal.
+pub fn generate_username_with(io: &mut dyn Prompter) -> String {
 
-    write_tty("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n");
-    write_tty("\x1b[1;36mQuestions for the user...\x1b[0m\n");
-    write_tty("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n\n");
+    io.write("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n");
+    io.write("\x1b[1;36mQuestions for the user...\x1b[0m\n");
+    io.write("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n\n");
 
     let _vibe = ask(
+        io,
         "\x1b[1;32m1) What vibe do you want..??\x1b[0m\n  a) und3rgr0und hacker b) 6yberpunk/g1!tch c) M1n1mal @nd myst3ri0us\n  d) 0ld sch0o1 l33tspeak e) 3lite/cryptic\nEnter your choice (a/b/c/d/e): ",
         &["a", "b", "c", "d", "e"],
         "d",
     );
 
     let meaning = ask(
+        io,
         "\x1b[1;32m2) What should be your name mean ..??\x1b[0m\n  a) Dark/Mysterious b) Rebellion/Chaos c) Techy/Code d) Space/Void/Null\n  e) abstract imagery f) Random meaning g) Depressed h) Suicidal\nEnter your choice (a/b/c/d/e/f/g/h): ",
         &["a", "b", "c", "d", "e", "f", "g", "h"],
         "a",
     );
 
     let mask = ask(
+        io,
         "\x1b[1;32m3) How aggressively should characters be masked?\x1b[0m\n  a) Subtle b) Balanced c) Heavy d) Phonetic\nEnter your choice (a/b/c/d): ",
         &["a", "b", "c", "d"],
         "b",
     );
 
     let length = ask(
+        io,
         "\x1b[1;32m4) Preferred Length\x1b[0m\n  a) Short (3-6 chars) b) Medium (7-12 chars) c) Long (13+ chars) d) Any length\nEnter your choice (a/b/c/d): ",
         &["a", "b", "c", "d"],
         "b",
@@ -341,6 +332,36 @@ mod tests {
         assert!(!transformed.is_empty());
     }
 
+    struct Scripted {
+        answers: Vec<&'static str>,
+        written: String,
+    }
+
+    impl Prompter for Scripted {
+        fn write(&mut self, s: &str) {
+            self.written.push_str(s);
+        }
+        fn read_line(&mut self) -> Option<String> {
+            if self.answers.is_empty() {
+                None
+            } else {
+                Some(self.answers.remove(0).to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn questionnaire_uses_supplied_terminal_and_defaults_on_eof() {
+        let mut io = Scripted { answers: vec!["a", "c", "d", "a"], written: String::new() };
+        let alias = generate_username_with(&mut io);
+        assert!(!alias.is_empty());
+        assert!(io.written.contains("Questions for the user"));
+        assert!(io.written.contains("Preferred Length"));
+
+        let mut eof = Scripted { answers: vec![], written: String::new() };
+        assert!(!generate_username_with(&mut eof).is_empty());
+    }
+
     #[test]
     fn test_is_pipe_mode() {
         // Calling is_pipe_mode must not panic or cause undefined behavior.
@@ -349,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_generate_username_produces_valid_alias() {
-        let alias = generate_username();
+        let alias = generate_default_username();
         assert!(!alias.is_empty());
     }
 
