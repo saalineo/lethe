@@ -53,8 +53,3 @@ pub fn read_line_raw() -> String {
 
     String::from_utf8_lossy(&buf).into_owned()
 }
-
-pub fn read_pin_stealth() -> String {
-    let _raw = RawTerminal::enter();
-    read_line_raw()
-}

@@ -11,7 +11,6 @@ use hardening::{anti_debug, dump, memory, namespace, seccomp, signals, watchdog}
 use obfstr::obfstr;
 use std::env;
 use std::panic;
-use zeroize::Zeroize;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     panic::set_hook(Box::new(|info| {
@@ -114,21 +113,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_server { "SERVER" } else { "CLIENT" }
         );
 
-        let pw = loop {
-            eprint!("\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Session Passphrase:\x1b[0m ");
-            let mut passphrase = hardening::input::read_pin_stealth();
-            eprintln!(); // newline after stealth reading
+        let tty = hardening::secure_tty::Tty::open()
+            .map_err(|e| format!("no controlling terminal: {e}"))?;
 
-            let trimmed = passphrase.trim();
-            if trimmed.is_empty() {
-                eprintln!("\x1b[1;31m[!] Passphrase cannot be empty. Please try again.\x1b[0m");
-                continue;
+        let passphrase = loop {
+            let s = hardening::secure_tty::read_secret(
+                &tty,
+                "\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Session Passphrase:\x1b[0m ",
+            )?;
+            if !s.as_bytes().is_empty() {
+                break s;
             }
-
-            let stretched = crypto::session::stretch(trimmed.as_bytes());
-            passphrase.zeroize();
-            break stretched;
+            tty.write_all(b"\x1b[1;31m[!] Passphrase cannot be empty. Please try again.\x1b[0m\n");
         };
+        let pw = crypto::session::stretch(passphrase.as_bytes());
+        drop(passphrase); // zeroized immediately
 
         eprintln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
 
