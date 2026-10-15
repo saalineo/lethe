@@ -17,8 +17,7 @@ pub fn client(stream: &mut TcpStream, auth_key: &[u8; 32]) -> io::Result<()> {
     let mut payload = [0u8; 64];
 
     let result = (|| {
-        getrandom::getrandom(&mut nonce)
-            .map_err(|_| io::Error::other("rng failure"))?;
+        getrandom::getrandom(&mut nonce).map_err(|_| io::Error::other("rng failure"))?;
 
         let mut mac = HmacSha256::new_from_slice(auth_key)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;

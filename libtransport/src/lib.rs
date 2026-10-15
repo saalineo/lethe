@@ -11,64 +11,98 @@ use zeroize::Zeroize;
 const BUF_SIZE: usize = 32 * 1024;
 const MAX_HANDLES: usize = 64;
 
-static HANDLES: Mutex<Vec<Option<Arc<Mutex<TcpStream>>>>> = Mutex::new(Vec::new());
-
-fn alloc_handle(stream: TcpStream) -> c_int {
-    let stream = Arc::new(Mutex::new(stream));
-    let mut handles = match HANDLES.lock() {
-        Ok(h) => h,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    for (i, slot) in handles.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(stream);
-            return i as c_int;
-        }
-    }
-
-    if handles.len() >= MAX_HANDLES {
-        return -1;
-    }
-
-    handles.push(Some(stream));
-    (handles.len() - 1) as c_int
+struct Conn {
+    rd: Mutex<TcpStream>,
+    wr: Mutex<TcpStream>,
+    ctl: TcpStream,
 }
 
+impl Conn {
+    fn new(stream: TcpStream) -> io::Result<Self> {
+        let wr = stream.try_clone()?;
+        let ctl = stream.try_clone()?;
+        Ok(Self {
+            rd: Mutex::new(stream),
+            wr: Mutex::new(wr),
+            ctl,
+        })
+    }
+
+    fn send(&self, data: &[u8]) -> io::Result<()> {
+        let mut wr = self.wr.lock().unwrap_or_else(|p| p.into_inner());
+        send_frame(&mut wr, data)
+    }
+
+    fn recv(&self) -> io::Result<Vec<u8>> {
+        let mut rd = self.rd.lock().unwrap_or_else(|p| p.into_inner());
+        recv_frame(&mut rd)
+    }
+
+    fn shutdown(&self) {
+        let _ = self.ctl.shutdown(Shutdown::Both);
+    }
+}
+
+static HANDLES: Mutex<Vec<Option<Arc<Conn>>>> = Mutex::new(Vec::new());
+
+fn alloc_handle(stream: TcpStream) -> io::Result<c_int> {
+    let conn = Arc::new(Conn::new(stream)?);
+    let mut handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
+
+    let idx = match handles.iter().position(Option::is_none) {
+        Some(i) => i,
+        None if handles.len() < MAX_HANDLES => {
+            handles.push(None);
+            handles.len() - 1
+        }
+        None => return Err(io::Error::other("handle table full")),
+    };
+
+    handles[idx] = Some(conn);
+    Ok(idx as c_int)
+}
+
+/// Retrieve a clone of `Arc<Conn>`.
+///
+/// Crucially, the global `HANDLES` table lock is released prior to returning,
+/// preventing global contention and deadlocks during subsequent I/O.
+fn conn(handle: c_int) -> Option<Arc<Conn>> {
+    if handle < 0 {
+        return None;
+    }
+    let handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
+    handles
+        .get(handle as usize)
+        .and_then(|slot| slot.as_ref().cloned())
+}
+
+/// Free a handle, clearing its slot for reuse and shutting down socket I/O.
+///
+/// Uses `ctl.shutdown(Shutdown::Both)` without acquiring `rd` or `wr` mutexes,
+/// ensuring any reader blocked on `read_exact` unblocks immediately.
 fn free_handle(handle: c_int) {
     if handle < 0 {
         return;
     }
-    let mut handles = match HANDLES.lock() {
-        Ok(h) => h,
-        Err(poisoned) => poisoned.into_inner(),
+    let conn = {
+        let mut handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
+        handles
+            .get_mut(handle as usize)
+            .and_then(|slot| slot.take())
     };
-    if let Some(slot) = handles.get_mut(handle as usize)
-        && let Some(stream) = slot.take()
-        && let Ok(s) = stream.lock()
-    {
-        let _ = s.shutdown(Shutdown::Both);
-    }
-}
 
-fn with_stream<F, R>(handle: c_int, f: F) -> Option<R>
-where
-    F: FnOnce(&mut TcpStream) -> R,
-{
-    if handle < 0 {
-        return None;
+    if let Some(c) = conn {
+        c.shutdown();
     }
-    let handles = HANDLES.lock().ok()?;
-    let slot = handles.get(handle as usize)?;
-    let stream = slot.as_ref()?;
-    let mut guard = stream.lock().ok()?;
-    Some(f(&mut guard))
 }
 
 fn send_frame(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     let len = data.len();
     if len > u32::MAX as usize {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "message too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "message too large",
+        ));
     }
     let len_bytes = (len as u32).to_be_bytes();
     stream.write_all(&len_bytes)?;
@@ -82,7 +116,10 @@ fn recv_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > BUF_SIZE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;
@@ -177,24 +214,14 @@ fn start_server(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
     let (mut stream, _) = listener.accept()?;
     handshake::server(&mut stream, auth_key)?;
 
-    let handle = alloc_handle(stream);
-    if handle < 0 {
-        Err(io::Error::other("handle allocation failed"))
-    } else {
-        Ok(handle)
-    }
+    alloc_handle(stream)
 }
 
 fn start_client(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
     let mut stream = TcpStream::connect(addr)?;
     handshake::client(&mut stream, auth_key)?;
 
-    let handle = alloc_handle(stream);
-    if handle < 0 {
-        Err(io::Error::other("handle allocation failed"))
-    } else {
-        Ok(handle)
-    }
+    alloc_handle(stream)
 }
 
 /// Send a frame of data over the given node handle.
@@ -203,11 +230,7 @@ fn start_client(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
 ///
 /// `data` must point to `length` valid readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn SendMessage(
-    handle: c_int,
-    data: *const c_uchar,
-    length: c_int,
-) -> c_int {
+pub unsafe extern "C" fn SendMessage(handle: c_int, data: *const c_uchar, length: c_int) -> c_int {
     std::panic::catch_unwind(|| {
         if length < 0 {
             return -1;
@@ -217,12 +240,11 @@ pub unsafe extern "C" fn SendMessage(
             Some(b) => b,
             None => return -1,
         };
-        let ok = with_stream(handle, |stream| send_frame(stream, buf).is_ok());
-        if ok == Some(true) {
-            length
-        } else {
-            -1
-        }
+        let conn = match conn(handle) {
+            Some(c) => c,
+            None => return -1,
+        };
+        if conn.send(buf).is_ok() { length } else { -1 }
     })
     .unwrap_or(-1)
 }
@@ -248,16 +270,18 @@ pub unsafe extern "C" fn RecvMessage(
             Some(d) => d,
             None => return -1,
         };
-
-        let result = with_stream(handle, recv_frame);
-        match result {
-            Some(Ok(mut frame)) => {
+        let conn = match conn(handle) {
+            Some(c) => c,
+            None => return -1,
+        };
+        match conn.recv() {
+            Ok(mut frame) => {
                 let n = frame.len().min(dst.len());
                 dst[..n].copy_from_slice(&frame[..n]);
                 frame.zeroize();
                 n as c_int
             }
-            _ => -1,
+            Err(_) => -1,
         }
     })
     .unwrap_or(-1)
@@ -278,16 +302,222 @@ pub unsafe extern "C" fn StopNode(handle: c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_test() -> std::sync::MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
 
     #[test]
     fn test_invalid_handle_ops() {
-        assert_eq!(with_stream(-1, |_| ()), None);
-        assert_eq!(with_stream(999, |_| ()), None);
+        let _guard = lock_test();
+        assert!(conn(-1).is_none());
+        assert!(conn(999).is_none());
         // SAFETY: Invalid handle is gracefully handled.
         unsafe {
+            assert_eq!(SendMessage(-1, std::ptr::null(), 0), -1);
+            assert_eq!(SendMessage(999, std::ptr::null(), 0), -1);
+            assert_eq!(RecvMessage(-1, 0, std::ptr::null_mut(), 0), -1);
+            assert_eq!(RecvMessage(999, 0, std::ptr::null_mut(), 0), -1);
             StopNode(-1);
             StopNode(999);
         }
     }
-}
 
+    #[test]
+    fn test_handle_table_lifecycle_and_recycling() {
+        let _guard = lock_test();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let s1 = TcpStream::connect(addr).unwrap();
+        let _server_conn = listener.accept().unwrap();
+        let h1 = alloc_handle(s1).unwrap();
+        assert!(h1 >= 0);
+
+        let s2 = TcpStream::connect(addr).unwrap();
+        let _server_conn2 = listener.accept().unwrap();
+        let h2 = alloc_handle(s2).unwrap();
+        assert!(h2 >= 0);
+        assert_ne!(h1, h2);
+
+        // Free h1
+        free_handle(h1);
+        assert!(conn(h1).is_none());
+
+        // Allocate again, it should recycle h1's slot (D15)
+        let s3 = TcpStream::connect(addr).unwrap();
+        let _server_conn3 = listener.accept().unwrap();
+        let h3 = alloc_handle(s3).unwrap();
+        assert_eq!(h1, h3);
+
+        free_handle(h2);
+        free_handle(h3);
+    }
+
+    #[test]
+    fn test_handle_table_saturation() {
+        let _guard = lock_test();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut handles = Vec::new();
+        // Allocate up to MAX_HANDLES
+        for _ in 0..MAX_HANDLES {
+            let client = TcpStream::connect(addr).unwrap();
+            let _server = listener.accept().unwrap();
+            match alloc_handle(client) {
+                Ok(h) => handles.push(h),
+                Err(_) => break,
+            }
+        }
+
+        // Table should now be saturated
+        let overflow_client = TcpStream::connect(addr).unwrap();
+        let _overflow_server = listener.accept().unwrap();
+        assert!(alloc_handle(overflow_client).is_err());
+
+        // Free one handle and verify we can allocate again
+        if let Some(h) = handles.pop() {
+            free_handle(h);
+            let retry_client = TcpStream::connect(addr).unwrap();
+            let _retry_server = listener.accept().unwrap();
+            let new_h = alloc_handle(retry_client).unwrap();
+            assert_eq!(new_h, h);
+            handles.push(new_h);
+        }
+
+        // Cleanup all allocated handles
+        for h in handles {
+            free_handle(h);
+        }
+    }
+
+    #[test]
+    fn test_full_duplex_concurrency() {
+        let _guard = lock_test();
+        let auth_key = [7u8; 32];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake::server(&mut stream, &auth_key).unwrap();
+            alloc_handle(stream).unwrap()
+        });
+
+        let mut client_stream = TcpStream::connect(addr).unwrap();
+        handshake::client(&mut client_stream, &auth_key).unwrap();
+        let client_handle = alloc_handle(client_stream).unwrap();
+        let server_handle = server_thread.join().unwrap();
+
+        let msg_a_to_b = b"hello from client to server";
+        let msg_b_to_a = b"greetings from server to client";
+
+        // Spawn concurrent threads to simultaneously receive in both directions
+        let t_client_recv = thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            // SAFETY: Valid buffer pointer and length
+            let n = unsafe { RecvMessage(client_handle, 0, buf.as_mut_ptr(), buf.len() as c_int) };
+            assert_eq!(n, msg_b_to_a.len() as c_int);
+            assert_eq!(&buf[..n as usize], msg_b_to_a);
+        });
+
+        let t_server_recv = thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            // SAFETY: Valid buffer pointer and length
+            let n = unsafe { RecvMessage(server_handle, 0, buf.as_mut_ptr(), buf.len() as c_int) };
+            assert_eq!(n, msg_a_to_b.len() as c_int);
+            assert_eq!(&buf[..n as usize], msg_a_to_b);
+        });
+
+        // Small delay to ensure both receivers are blocked waiting on RecvMessage
+        thread::sleep(Duration::from_millis(50));
+
+        // Simultaneous sends from both sides while receivers are blocked
+        // SAFETY: Valid buffer pointer and length
+        let sent_c = unsafe {
+            SendMessage(
+                client_handle,
+                msg_a_to_b.as_ptr(),
+                msg_a_to_b.len() as c_int,
+            )
+        };
+        assert_eq!(sent_c, msg_a_to_b.len() as c_int);
+
+        // SAFETY: Valid buffer pointer and length
+        let sent_s = unsafe {
+            SendMessage(
+                server_handle,
+                msg_b_to_a.as_ptr(),
+                msg_b_to_a.len() as c_int,
+            )
+        };
+        assert_eq!(sent_s, msg_b_to_a.len() as c_int);
+
+        t_client_recv.join().unwrap();
+        t_server_recv.join().unwrap();
+
+        // SAFETY: Cleaning up test handles
+        unsafe {
+            StopNode(client_handle);
+            StopNode(server_handle);
+        }
+    }
+
+    #[test]
+    fn test_shutdown_unblocks_blocked_reader() {
+        let _guard = lock_test();
+        let auth_key = [9u8; 32];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake::server(&mut stream, &auth_key).unwrap();
+            alloc_handle(stream).unwrap()
+        });
+
+        let mut client_stream = TcpStream::connect(addr).unwrap();
+        handshake::client(&mut client_stream, &auth_key).unwrap();
+        let client_handle = alloc_handle(client_stream).unwrap();
+        let server_handle = server_thread.join().unwrap();
+
+        let reader_unblocked = Arc::new(AtomicBool::new(false));
+        let reader_flag = Arc::clone(&reader_unblocked);
+
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            // RecvMessage will block because server sends nothing
+            // SAFETY: Valid buffer pointer and length
+            let n = unsafe { RecvMessage(client_handle, 0, buf.as_mut_ptr(), buf.len() as c_int) };
+            assert_eq!(n, -1);
+            reader_flag.store(true, Ordering::SeqCst);
+        });
+
+        // Wait to make sure reader is blocked in RecvMessage
+        thread::sleep(Duration::from_millis(50));
+        assert!(!reader_unblocked.load(Ordering::SeqCst));
+
+        // StopNode should call ctl.shutdown without needing rd lock, unblocking reader immediately
+        // SAFETY: Free client handle
+        unsafe {
+            StopNode(client_handle);
+        }
+
+        reader_thread.join().unwrap();
+        assert!(reader_unblocked.load(Ordering::SeqCst));
+
+        // SAFETY: Clean up server handle
+        unsafe {
+            StopNode(server_handle);
+        }
+    }
+}

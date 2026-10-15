@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "client",
+    "cli",
     "libtransport",
 ]
 resolver = "2"

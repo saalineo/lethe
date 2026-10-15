@@ -1,7 +1,7 @@
 .PHONY: all transport client clean run-server run-client
 
 TRANSPORT_DIR := libtransport
-CLIENT_DIR := client
+CLIENT_DIR := cli
 LIB := target/release/libsirfz.so
 BIN := target/release/sirfz
 DEST := target/release
