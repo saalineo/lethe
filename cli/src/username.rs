@@ -1,10 +1,56 @@
 use rand::seq::SliceRandom;
-use std::io::{self, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+
+/// Detects whether either stdin or stdout is redirected / piped.
+pub fn is_pipe_mode() -> bool {
+    // SAFETY: isatty is a safe libc query checking if file descriptors are terminals.
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 0 || libc::isatty(libc::STDOUT_FILENO) == 0 }
+}
+
+fn write_tty(msg: &str) {
+    if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = write!(tty, "{}", msg);
+        let _ = tty.flush();
+    }
+}
+
+fn ask(prompt: &str, valid: &[&str], default: &str) -> String {
+    write_tty(prompt);
+
+    let Ok(tty_in) = File::open("/dev/tty") else {
+        return default.to_string();
+    };
+
+    let mut reader = BufReader::new(tty_in);
+    let mut input = String::new();
+    if reader.read_line(&mut input).is_err() {
+        return default.to_string();
+    }
+
+    let trimmed = input.trim().to_lowercase();
+    if valid.contains(&trimmed.as_str()) {
+        trimmed
+    } else {
+        default.to_string()
+    }
+}
+
+/// Generate a default username without interactive prompts.
+pub fn generate_default_username() -> String {
+    let base = choose_word("dark", "short");
+    apply_transformation(&base, "subtle")
+}
 
 pub fn generate_username() -> String {
-    println!("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m");
-    println!("\x1b[1;36mQuestions for the user...\x1b[0m");
-    println!("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n");
+    // In pipe modes or during unit tests, skip questions entirely to avoid polluting piped stdout or consuming stdin.
+    if is_pipe_mode() || cfg!(test) {
+        return generate_default_username();
+    }
+
+    write_tty("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n");
+    write_tty("\x1b[1;36mQuestions for the user...\x1b[0m\n");
+    write_tty("\x1b[1;36m~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b[0m\n\n");
 
     let _vibe = ask(
         "\x1b[1;32m1) What vibe do you want..??\x1b[0m\n  a) und3rgr0und hacker b) 6yberpunk/g1!tch c) M1n1mal @nd myst3ri0us\n  d) 0ld sch0o1 l33tspeak e) 3lite/cryptic\nEnter your choice (a/b/c/d/e): ",
@@ -62,37 +108,80 @@ pub fn generate_username() -> String {
     apply_transformation(&base, mask_str)
 }
 
-fn ask(prompt: &str, valid: &[&str], default: &str) -> String {
-    print!("{}", prompt);
-    if io::stdout().flush().is_err() {
-        return default.to_string();
-    }
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return default.to_string();
-    }
-    let trimmed = input.trim().to_lowercase();
-    if valid.contains(&trimmed.as_str()) {
-        trimmed
-    } else {
-        default.to_string()
-    }
-}
-
 fn choose_word(meaning: &str, length_pref: &str) -> String {
     let mut rng = rand::thread_rng();
 
-    let words_dark = ["dark", "shadow", "night", "demon", "ghost", "mystery", "obscure", "gloom", "shade", "phantom", "specter", "veil"];
-    let words_chaos = ["chaos", "rebellion", "riot", "havoc", "anarchy", "destruction", "disorder", "turmoil", "mayhem", "frenzy", "panic"];
-    let words_tech = ["tech", "computer", "code", "cyber", "glitch", "digital", "network", "hacker", "byte", "node", "wire", "logic", "hack", "proxy"];
-    let words_space = ["space", "void", "universe", "star", "cosmos", "galaxy", "abyss", "nebula", "planet", "orbit", "meteor", "comet"];
-    let words_abstract = ["abstract", "surreal", "dream", "illusion", "vision", "mirage", "enigma", "concept", "notion", "idea", "thought"];
-    let words_depressed = ["depression", "sadness", "grief", "melancholy", "sorrow", "despair", "misery", "woe", "agony", "pain"];
-    let words_suicidal = ["death", "end", "fatal", "doom", "perish", "oblivion", "ruin", "demise", "fate", "grave", "tomb"];
-    let words_random = ["apple", "stone", "fire", "ice", "wind", "earth", "water", "light", "time", "mind", "soul", "heart"];
+    let words_dark = [
+        "dark", "shadow", "night", "demon", "ghost", "mystery", "obscure", "gloom", "shade",
+        "phantom", "specter", "veil",
+    ];
+    let words_chaos = [
+        "chaos",
+        "rebellion",
+        "riot",
+        "havoc",
+        "anarchy",
+        "destruction",
+        "disorder",
+        "turmoil",
+        "mayhem",
+        "frenzy",
+        "panic",
+    ];
+    let words_tech = [
+        "tech", "computer", "code", "cyber", "glitch", "digital", "network", "hacker", "byte",
+        "node", "wire", "logic", "hack", "proxy",
+    ];
+    let words_space = [
+        "space", "void", "universe", "star", "cosmos", "galaxy", "abyss", "nebula", "planet",
+        "orbit", "meteor", "comet",
+    ];
+    let words_abstract = [
+        "abstract", "surreal", "dream", "illusion", "vision", "mirage", "enigma", "concept",
+        "notion", "idea", "thought",
+    ];
+    let words_depressed = [
+        "depression",
+        "sadness",
+        "grief",
+        "melancholy",
+        "sorrow",
+        "despair",
+        "misery",
+        "woe",
+        "agony",
+        "pain",
+    ];
+    let words_suicidal = [
+        "death", "end", "fatal", "doom", "perish", "oblivion", "ruin", "demise", "fate", "grave",
+        "tomb",
+    ];
+    let words_random = [
+        "apple", "stone", "fire", "ice", "wind", "earth", "water", "light", "time", "mind", "soul",
+        "heart",
+    ];
 
-    let adjectives = ["silent", "lost", "broken", "forgotten", "hidden", "fallen", "cold", "blind", "dead", "empty", "hollow", "pale", "grim", "bleak", "stark"];
-    let nouns = ["walker", "seeker", "bringer", "soul", "mind", "eye", "hand", "voice", "face", "heart", "blood", "bone", "ash", "dust"];
+    let adjectives = [
+        "silent",
+        "lost",
+        "broken",
+        "forgotten",
+        "hidden",
+        "fallen",
+        "cold",
+        "blind",
+        "dead",
+        "empty",
+        "hollow",
+        "pale",
+        "grim",
+        "bleak",
+        "stark",
+    ];
+    let nouns = [
+        "walker", "seeker", "bringer", "soul", "mind", "eye", "hand", "voice", "face", "heart",
+        "blood", "bone", "ash", "dust",
+    ];
 
     let seeds = match meaning {
         "dark" => &words_dark[..],
@@ -144,7 +233,10 @@ fn choose_word(meaning: &str, length_pref: &str) -> String {
         }
         base
     } else {
-        matching.choose(&mut rng).cloned().unwrap_or_else(|| "ghost".to_string())
+        matching
+            .choose(&mut rng)
+            .cloned()
+            .unwrap_or_else(|| "ghost".to_string())
     }
 }
 
@@ -170,7 +262,8 @@ fn apply_transformation(word: &str, mask_level: &str) -> String {
         (0..word.len()).collect()
     };
     pool.shuffle(&mut rng);
-    let allowed: std::collections::HashSet<usize> = pool.into_iter().take(transform_budget).collect();
+    let allowed: std::collections::HashSet<usize> =
+        pool.into_iter().take(transform_budget).collect();
 
     let mut transformed = String::new();
     for (i, c) in word.chars().enumerate() {
@@ -246,5 +339,50 @@ mod tests {
 
         let transformed = apply_transformation(&word, "balanced");
         assert!(!transformed.is_empty());
+    }
+
+    #[test]
+    fn test_is_pipe_mode() {
+        // Calling is_pipe_mode must not panic or cause undefined behavior.
+        let _ = is_pipe_mode();
+    }
+
+    #[test]
+    fn test_generate_username_produces_valid_alias() {
+        let alias = generate_username();
+        assert!(!alias.is_empty());
+    }
+
+    #[test]
+    fn test_choose_word_all_meanings_and_lengths() {
+        let meanings = [
+            "dark",
+            "chaos",
+            "tech",
+            "space",
+            "abstract",
+            "depressed",
+            "suicidal",
+            "unknown",
+        ];
+        let lengths = ["short", "medium", "long", "any", "other"];
+
+        for meaning in meanings {
+            for length in lengths {
+                let word = choose_word(meaning, length);
+                assert!(!word.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_transformation_masks() {
+        let masks = ["subtle", "balanced", "heavy", "phonetic", "passthrough"];
+        let sample = "SilentShadowHacker123";
+
+        for mask in masks {
+            let res = apply_transformation(sample, mask);
+            assert!(!res.is_empty());
+        }
     }
 }

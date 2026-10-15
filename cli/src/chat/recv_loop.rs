@@ -1,17 +1,21 @@
 use std::io::{Write, stdout};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 const RECV_BUF_SIZE: usize = 32 * 1024;
 
-pub fn spawn(router_arc: Arc<RwLock<crate::ffi::transport::TransportHandle>>, username: String) {
+pub fn spawn(transport: Arc<crate::ffi::transport::TransportHandle>, username: String) {
     thread::spawn(move || {
         let mut buf = vec![0u8; RECV_BUF_SIZE];
         loop {
-            if let Ok(t) = router_arc.read()
-                && let n = t.recv(0, &mut buf)
-                && n > 0
+            // Do not hold any router lock across blocking recv
+            let n = transport.recv(0, &mut buf);
+            if n < 0 {
+                // Peer disconnected: trigger secure shutdown immediately
+                crate::shutdown::secure_shutdown();
+                break;
+            }
+            if n > 0
                 && let Ok(plaintext) = crate::crypto::secret::open(&buf[..n as usize])
             {
                 let msg = String::from_utf8_lossy(&plaintext);
@@ -22,7 +26,6 @@ pub fn spawn(router_arc: Arc<RwLock<crate::ffi::transport::TransportHandle>>, us
                 );
                 let _ = stdout().flush();
             }
-            thread::sleep(Duration::from_millis(10));
         }
     });
 }

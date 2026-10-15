@@ -59,29 +59,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let args: Vec<String> = env::args().collect();
         let is_server = args.iter().any(|a| a == "--server");
-        let addr = args
+
+        let explicit_addr = args
             .iter()
             .position(|a| a == "--addr")
             .and_then(|i| args.get(i + 1))
-            .map(|s| s.as_str())
-            .unwrap_or("0.0.0.0:9000");
+            .map(|s| s.as_str());
 
-        let lib_path = args
+        let addr = if let Some(a) = explicit_addr {
+            a.to_string()
+        } else if !username::is_pipe_mode() {
+            read_address_from_tty(is_server)
+        } else if is_server {
+            "0.0.0.0:9000".to_string()
+        } else {
+            "127.0.0.1:9000".to_string()
+        };
+
+        let explicit_lib = args
             .iter()
             .position(|a| a == "--lib")
-            .and_then(|i| args.get(i + 1))
-            .map(|s| s.as_str())
-            .unwrap_or_else(|| {
-                if std::path::Path::new("./liblethe.so").exists() {
-                    "./liblethe.so"
-                } else if std::path::Path::new("./libsirfz.so").exists() {
-                    "./libsirfz.so"
-                } else if std::path::Path::new("./libtransport.so").exists() {
-                    "./libtransport.so"
-                } else {
-                    "../libtransport/target/release/liblethe.so"
-                }
-            });
+            .and_then(|i| args.get(i + 1));
+
+        let lib_path = if let Some(p) = explicit_lib {
+            // Explicit --lib: resolve with canonicalize
+            std::fs::canonicalize(p)
+                .map_err(|e| format!("failed to canonicalize explicit --lib '{}': {}", p, e))?
+        } else {
+            // Refuse relative paths unless --lib is explicit. Look only in exe directory.
+            let exe_dir_lib = env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("liblethe.so")));
+
+            if let Some(ref p) = exe_dir_lib
+                && p.exists()
+            {
+                std::fs::canonicalize(p)
+                    .map_err(|e| format!("failed to canonicalize library path: {}", e))?
+            } else {
+                return Err(
+                    "no explicit --lib provided; relative paths refused. Please pass --lib <path>"
+                        .into(),
+                );
+            }
+        };
 
         eprintln!(
             "\x1b[1;30m[+]\x1b[0m \x1b[32m{}\x1b[0m",
@@ -111,13 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
 
-        let my_username = username::generate_username();
-        eprintln!(
-            "\n\x1b[1;30m[+]\x1b[0m \x1b[32mAssigned Alias: {}\x1b[0m\n",
-            my_username
-        );
-
-        let transport = TransportHandle::load(lib_path, is_server, addr)
+        let transport = TransportHandle::load(&lib_path.to_string_lossy(), is_server, &addr)
             .map_err(|e| format!("transport init failed: {}", e))?;
 
         let role = crypto::session::Role::from_is_server(is_server);
@@ -133,10 +148,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(pw);
 
         let router = HostRouter::new(transport);
-        chat::terminal::run(router, my_username);
+        chat::terminal::run(router);
 
         Ok(())
     });
 
     Ok(())
+}
+
+fn read_address_from_tty(is_server: bool) -> String {
+    let default_addr = if is_server {
+        "0.0.0.0:9000"
+    } else {
+        "127.0.0.1:9000"
+    };
+    let prompt = if is_server {
+        "\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Listen Address [0.0.0.0:9000]:\x1b[0m "
+    } else {
+        "\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Peer Address [127.0.0.1:9000]:\x1b[0m "
+    };
+
+    if let Ok(mut tty_out) = std::fs::OpenOptions::new().write(true).open("/dev/tty")
+        && let Ok(tty_in) = std::fs::File::open("/dev/tty")
+    {
+        let _ = std::io::Write::write_all(&mut tty_out, prompt.as_bytes());
+        let _ = std::io::Write::flush(&mut tty_out);
+
+        let mut reader = std::io::BufReader::new(tty_in);
+        let mut line = String::new();
+        if std::io::BufRead::read_line(&mut reader, &mut line).is_ok() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    default_addr.to_string()
 }
