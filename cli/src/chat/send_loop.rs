@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::ffi::transport::TransportHandle;
 use crate::hardening::input::read_line_raw;
-use crate::proto::cell::{self, Frag, Kind};
+use crate::proto::cell::{CellKeys, Frag, Kind};
 use crate::proto::frame;
 use crate::proto::params::{MAX_MESSAGE, TICK};
 
@@ -15,7 +15,14 @@ pub const QUEUE_DEPTH: usize = 1024;
 
 /// Spawns the constant-rate scheduler: exactly one cell per `TICK`, real
 /// fragment if queued, otherwise a noise cell built through the same path.
-pub fn spawn_scheduler(queue: Receiver<Frag>, transport: Arc<TransportHandle>) {
+///
+/// A failed `send` shuts the process down with `fail_code`.
+pub fn spawn_scheduler(
+    queue: Receiver<Frag>,
+    transport: Arc<TransportHandle>,
+    keys: Arc<dyn CellKeys>,
+    fail_code: i32,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut next = Instant::now() + TICK;
         loop {
@@ -32,7 +39,7 @@ pub fn spawn_scheduler(queue: Receiver<Frag>, transport: Arc<TransportHandle>) {
                 Err(TryRecvError::Disconnected) => break,
             };
 
-            let cell = match crate::crypto::secret::with_send(|c| cell::encode(c, &frag)) {
+            let cell = match keys.seal(&frag) {
                 Ok(c) => c,
                 Err(_) => {
                     crate::shutdown::secure_shutdown();
@@ -40,11 +47,11 @@ pub fn spawn_scheduler(queue: Receiver<Frag>, transport: Arc<TransportHandle>) {
                 }
             };
             if transport.send(&cell) < 0 {
-                crate::shutdown::secure_shutdown();
+                crate::shutdown::secure_shutdown_with(fail_code);
                 return;
             }
         }
-    });
+    })
 }
 
 /// UI side: reads whole lines and queues their fragments; never touches the wire.
@@ -85,7 +92,8 @@ pub fn run(queue: SyncSender<Frag>, username: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::ratchet::{Chain, SessionKeys};
+    use crate::crypto::ratchet::Chain;
+    use crate::proto::cell::LocalKeys;
     use crate::proto::params::CELL_LEN;
     use std::sync::mpsc::sync_channel;
     use std::time::Duration;
@@ -99,15 +107,7 @@ mod tests {
             Some(p) => *p,
             None => return, // shared library not built
         };
-        let _lock = crate::crypto::secret::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-
         let key = [9u8; 32];
-        crate::crypto::secret::set_session(SessionKeys {
-            send: Chain::new(key),
-            recv: Chain::new(key),
-        });
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -123,7 +123,12 @@ mod tests {
         for f in frame::fragment(Kind::Chat, &msg) {
             tx.send(f).unwrap();
         }
-        spawn_scheduler(rx, Arc::clone(&client));
+        spawn_scheduler(
+            rx,
+            Arc::clone(&client),
+            Arc::new(LocalKeys::new(key, key)),
+            0,
+        );
 
         let mut chain = Chain::new(key);
         let mut asm = frame::Reassembler::new();
@@ -134,7 +139,7 @@ mod tests {
             let mut buf = [0u8; CELL_LEN];
             assert_eq!(server.recv(0, &mut buf), CELL_LEN as i32);
             times.push(Instant::now());
-            let f = cell::decode(&mut chain, &buf).unwrap();
+            let f = crate::proto::cell::decode(&mut chain, &buf).unwrap();
             kinds.push(f.kind);
             if f.kind != Kind::Noise {
                 if let Some(m) = asm.push(f).unwrap() {
@@ -152,6 +157,5 @@ mod tests {
         assert!(span < TICK * 5 + Duration::from_millis(250), "too slow: {span:?}");
 
         drop(tx);
-        crate::crypto::secret::wipe_session();
     }
 }

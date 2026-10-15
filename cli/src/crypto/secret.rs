@@ -117,6 +117,24 @@ pub fn with_recv<R>(
     }
 }
 
+/// [`CellKeys`](crate::proto::cell::CellKeys) backed by the global `SESSION`.
+pub struct GlobalSession;
+
+impl crate::proto::cell::CellKeys for GlobalSession {
+    fn seal(
+        &self,
+        f: &crate::proto::cell::Frag,
+    ) -> Result<[u8; crate::proto::params::CELL_LEN], &'static str> {
+        with_send(|c| crate::proto::cell::encode(c, f))
+    }
+    fn open(
+        &self,
+        wire: &[u8; crate::proto::params::CELL_LEN],
+    ) -> Result<crate::proto::cell::Frag, &'static str> {
+        with_recv(|c| crate::proto::cell::decode(c, wire))
+    }
+}
+
 /// Explicitly wipes and clears the session keys from memory.
 #[allow(dead_code)]
 pub fn wipe_session() {

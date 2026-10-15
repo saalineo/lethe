@@ -7,6 +7,11 @@ use std::sync::atomic::{Ordering, compiler_fence};
 static SHUTDOWN_ONCE: Once = Once::new();
 
 pub fn secure_shutdown() {
+    secure_shutdown_with(0)
+}
+
+/// Same as [`secure_shutdown`] but exits with `code` (file-transfer verdicts).
+pub fn secure_shutdown_with(code: i32) {
     SHUTDOWN_ONCE.call_once(|| {
         eprintln!(
             "\n[!] Secure shutdown initiated. Zeroizing session keys and unlocking memory..."
@@ -20,6 +25,6 @@ pub fn secure_shutdown() {
         compiler_fence(Ordering::SeqCst);
         memory::unlock_memory();
 
-        process::exit(0);
+        process::exit(code);
     });
 }

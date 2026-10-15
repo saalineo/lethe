@@ -77,6 +77,40 @@ pub fn decode(chain: &mut Chain, wire: &[u8; CELL_LEN]) -> Result<Frag, &'static
     })
 }
 
+/// Source of the send/receive chains. Production uses the global session
+/// (so shutdown can wipe the keys); tests use independent local chains.
+pub trait CellKeys: Send + Sync {
+    fn seal(&self, f: &Frag) -> Result<[u8; CELL_LEN], &'static str>;
+    fn open(&self, wire: &[u8; CELL_LEN]) -> Result<Frag, &'static str>;
+}
+
+/// Independent chains held locally; used to run both peers inside one process.
+#[cfg(test)]
+pub struct LocalKeys {
+    send: std::sync::Mutex<Chain>,
+    recv: std::sync::Mutex<Chain>,
+}
+
+#[cfg(test)]
+impl LocalKeys {
+    pub fn new(send: [u8; 32], recv: [u8; 32]) -> Self {
+        Self {
+            send: std::sync::Mutex::new(Chain::new(send)),
+            recv: std::sync::Mutex::new(Chain::new(recv)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl CellKeys for LocalKeys {
+    fn seal(&self, f: &Frag) -> Result<[u8; CELL_LEN], &'static str> {
+        encode(&mut self.send.lock().unwrap(), f)
+    }
+    fn open(&self, wire: &[u8; CELL_LEN]) -> Result<Frag, &'static str> {
+        decode(&mut self.recv.lock().unwrap(), wire)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
