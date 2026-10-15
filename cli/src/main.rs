@@ -5,6 +5,7 @@ mod hardening;
 mod ipc;
 mod mode;
 mod transfer;
+mod ui;
 mod proto;
 mod shutdown;
 mod username;
