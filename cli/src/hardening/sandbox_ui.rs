@@ -96,10 +96,20 @@ pub fn redirect_stdio_to_devnull() -> io::Result<()> {
 
 /// Applies the full UI confinement to the calling (forked) process.
 pub fn confine_self(ipc_fd: i32, tty_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    confine(ipc_fd, tty_fd, true)
+}
+
+/// [`confine_self`] with optional memory locking (unprivileged test harnesses
+/// lack `CAP_IPC_LOCK`; production always passes `true`).
+pub fn confine(
+    ipc_fd: i32,
+    tty_fd: i32,
+    lock_memory: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: process-wide hardening calls with constant arguments.
     unsafe {
         // The UI sees plaintext too: keep it out of swap and un-dumpable.
-        if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
+        if lock_memory && libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
             return Err(io::Error::last_os_error().into());
         }
         if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {

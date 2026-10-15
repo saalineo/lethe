@@ -1,5 +1,10 @@
 use libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
 
+const TCGETS2: u64 = 0x802c_542a;
+const TCSETS2: u64 = 0x402c_542b;
+const TCSETSW2: u64 = 0x402c_542c;
+const TCSETSF2: u64 = 0x402c_542d;
+
 /// Which sandbox profile to load.
 pub enum Profile {
     /// The network/crypto core.
@@ -52,18 +57,32 @@ fn ui_profile(ipc_fd: i32, tty_fd: i32) -> Result<ScmpFilterContext, Box<dyn std
         }
     }
 
+    // std's UnixStream read/write use recv/send (recvfrom/sendto): IPC fd only.
+    for name in ["recvfrom", "sendto"] {
+        c.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name(name)?,
+            &[ScmpArgCompare::new(0, ScmpCompareOp::Equal, ipc_fd as u64)],
+        )?;
+    }
+
     // termios and window size only.
     for req in [
-        libc::TCGETS,
-        libc::TCSETS,
-        libc::TCSETSW,
-        libc::TCSETSF,
-        libc::TIOCGWINSZ,
+        libc::TCGETS as u64,
+        libc::TCSETS as u64,
+        libc::TCSETSW as u64,
+        libc::TCSETSF as u64,
+        libc::TIOCGWINSZ as u64,
+        // newer glibc drives termios through the termios2 ioctls
+        TCGETS2,
+        TCSETS2,
+        TCSETSW2,
+        TCSETSF2,
     ] {
         c.add_rule_conditional(
             ScmpAction::Allow,
             ScmpSyscall::from_name("ioctl")?,
-            &[ScmpArgCompare::new(1, ScmpCompareOp::Equal, req as u64)],
+            &[ScmpArgCompare::new(1, ScmpCompareOp::Equal, req)],
         )?;
     }
     Ok(c)
