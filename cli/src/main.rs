@@ -2,6 +2,7 @@ mod chat;
 mod crypto;
 mod ffi;
 mod hardening;
+mod ipc;
 mod mode;
 mod transfer;
 mod proto;
