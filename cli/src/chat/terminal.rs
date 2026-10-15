@@ -17,7 +17,7 @@ pub fn run(router: HostRouter) {
         queue_rx,
         router.transport(),
         std::sync::Arc::new(crate::crypto::secret::GlobalSession),
-        0,
+        Some(0),
     );
     super::recv_loop::spawn(router.transport(), my_username.clone());
     super::send_loop::run(queue_tx, &my_username);

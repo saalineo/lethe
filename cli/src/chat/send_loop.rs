@@ -16,12 +16,12 @@ pub const QUEUE_DEPTH: usize = 1024;
 /// Spawns the constant-rate scheduler: exactly one cell per `TICK`, real
 /// fragment if queued, otherwise a noise cell built through the same path.
 ///
-/// A failed `send` shuts the process down with `fail_code`.
+/// A failed `send` shuts the process down with `fail_code`; `None` just ends the thread.
 pub fn spawn_scheduler(
     queue: Receiver<Frag>,
     transport: Arc<TransportHandle>,
     keys: Arc<dyn CellKeys>,
-    fail_code: i32,
+    fail_code: Option<i32>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut next = Instant::now() + TICK;
@@ -47,7 +47,9 @@ pub fn spawn_scheduler(
                 }
             };
             if transport.send(&cell) < 0 {
-                crate::shutdown::secure_shutdown_with(fail_code);
+                if let Some(code) = fail_code {
+                    crate::shutdown::secure_shutdown_with(code);
+                }
                 return;
             }
         }
@@ -127,7 +129,7 @@ mod tests {
             rx,
             Arc::clone(&client),
             Arc::new(LocalKeys::new(key, key)),
-            0,
+            None,
         );
 
         let mut chain = Chain::new(key);

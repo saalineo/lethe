@@ -3,6 +3,7 @@ mod crypto;
 mod ffi;
 mod hardening;
 mod mode;
+mod transfer;
 mod proto;
 mod shutdown;
 mod username;
