@@ -1,7 +1,7 @@
 use super::cell::{FLAG_LAST, Frag, Kind};
 use super::params::MAX_PAYLOAD;
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::SyncSender;
 use zeroize::Zeroizing;
 
@@ -73,6 +73,80 @@ pub fn send_stream<R: Read>(mut input: R, queue: &SyncSender<Frag>) -> io::Resul
     queue.send(end_frag(hasher.finalize().into())).map_err(gone)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Idle,
+    Receiving,
+    Finished,
+}
+
+pub struct RecvState {
+    phase: Phase,
+    hasher: Sha256,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Done {
+    No,
+    Ok,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileError {
+    /// Output could not be written (e.g. downstream pipe closed).
+    Output,
+    /// Trailer hash differs from the received bytes.
+    HashMismatch,
+    /// Out-of-order or foreign cell kind.
+    Unexpected,
+}
+
+impl FileError {
+    pub fn exit_code(self) -> i32 {
+        match self {
+            FileError::Output => EXIT_LOCAL,
+            FileError::HashMismatch | FileError::Unexpected => EXIT_MISMATCH,
+        }
+    }
+}
+
+impl RecvState {
+    pub fn new() -> Self {
+        Self {
+            phase: Phase::Idle,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Consumes one file cell; data is written through immediately, nothing is kept.
+    pub fn on_frag(&mut self, out: &mut impl Write, f: Frag) -> Result<Done, FileError> {
+        match (f.kind, self.phase) {
+            (Kind::FileBegin, Phase::Idle) => {
+                if f.payload.first() != Some(&FILE_VERSION) {
+                    return Err(FileError::Unexpected);
+                }
+                self.phase = Phase::Receiving;
+                Ok(Done::No)
+            }
+            (Kind::FileData, Phase::Receiving) => {
+                self.hasher.update(&f.payload);
+                out.write_all(&f.payload).map_err(|_| FileError::Output)?;
+                out.flush().map_err(|_| FileError::Output)?;
+                Ok(Done::No)
+            }
+            (Kind::FileEnd, Phase::Receiving) => {
+                self.phase = Phase::Finished;
+                if self.hasher.clone().finalize().as_slice() == &f.payload[..] {
+                    Ok(Done::Ok)
+                } else {
+                    Err(FileError::HashMismatch)
+                }
+            }
+            _ => Err(FileError::Unexpected),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +183,69 @@ mod tests {
         drop(tx);
         let kinds: Vec<Kind> = rx.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [Kind::FileBegin, Kind::FileEnd]);
+    }
+
+    fn frames(data: &[u8]) -> Vec<Frag> {
+        let (tx, rx) = sync_channel(64);
+        send_stream(data, &tx).unwrap();
+        drop(tx);
+        rx.iter().collect()
+    }
+
+    #[test]
+    fn receiver_writes_through_and_verifies() {
+        let data = vec![0x5Au8; 3000];
+        let mut st = RecvState::new();
+        let mut out = Vec::new();
+        let mut res = Done::No;
+        for f in frames(&data) {
+            res = st.on_frag(&mut out, f).unwrap();
+        }
+        assert_eq!(res, Done::Ok);
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn receiver_detects_mismatch_and_order_errors() {
+        let mut fr = frames(b"hello");
+        fr.last_mut().unwrap().payload[0] ^= 1;
+        let mut st = RecvState::new();
+        let mut out = Vec::new();
+        let mut err = None;
+        for f in fr {
+            if let Err(e) = st.on_frag(&mut out, f) {
+                err = Some(e);
+            }
+        }
+        assert_eq!(err, Some(FileError::HashMismatch));
+        assert_eq!(err.unwrap().exit_code(), EXIT_MISMATCH);
+
+        // data before begin
+        let mut st = RecvState::new();
+        let f = Frag { kind: Kind::FileData, flags: 0, payload: vec![1] };
+        assert_eq!(st.on_frag(&mut out, f), Err(FileError::Unexpected));
+        // chat during a transfer
+        let mut st = RecvState::new();
+        st.on_frag(&mut out, begin_frag()).unwrap();
+        let f = Frag { kind: Kind::Chat, flags: FLAG_LAST, payload: vec![] };
+        assert_eq!(st.on_frag(&mut out, f), Err(FileError::Unexpected));
+    }
+
+    #[test]
+    fn closed_output_is_local_error() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut st = RecvState::new();
+        st.on_frag(&mut Broken, begin_frag()).unwrap();
+        let f = Frag { kind: Kind::FileData, flags: 0, payload: vec![1] };
+        let e = st.on_frag(&mut Broken, f).unwrap_err();
+        assert_eq!(e.exit_code(), EXIT_LOCAL);
     }
 }
