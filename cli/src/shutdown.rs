@@ -13,7 +13,7 @@ pub fn secure_shutdown() {
 /// Same as [`secure_shutdown`] but exits with `code` (file-transfer verdicts).
 pub fn secure_shutdown_with(code: i32) {
     SHUTDOWN_ONCE.call_once(|| {
-        eprintln!(
+        crate::status_ln!(
             "\n[!] Secure shutdown initiated. Zeroizing session keys and unlocking memory..."
         );
 

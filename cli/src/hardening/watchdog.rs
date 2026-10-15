@@ -36,7 +36,7 @@ where
                 }
 
                 if WIFSIGNALED(child_execution_status) {
-                    eprintln!(
+                    crate::status_ln!(
                         "\n[!] Watchdog Alert: Child terminated by signal {}",
                         WTERMSIG(child_execution_status)
                     );
@@ -48,7 +48,7 @@ where
                     match sig {
                         libc::SIGSYS | libc::SIGSEGV | libc::SIGILL
                         | libc::SIGBUS | libc::SIGABRT | libc::SIGFPE => {
-                            eprintln!(
+                            crate::status_ln!(
                                 "\n[!] Watchdog Alert: Child killed by signal {} (security violation)",
                                 sig
                             );

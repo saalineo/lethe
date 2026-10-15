@@ -3,8 +3,8 @@ use libc::{
     ECHO, ECHONL, ICANON, O_CLOEXEC, O_NOCTTY, O_RDWR, TCSAFLUSH, VMIN, VTIME, open, read,
     tcgetattr, tcsetattr, termios, write,
 };
-use std::io;
-use std::sync::Mutex;
+use std::io::{self, Write};
+use std::sync::{Mutex, OnceLock};
 use zeroize::Zeroize;
 
 /// Terminal state to restore on abnormal exit paths (signals, panic hook),
@@ -129,4 +129,29 @@ pub fn read_secret(tty: &Tty, prompt: &str) -> io::Result<SecretBuf> {
     b.zeroize();
     tty.write_all(b"\n");
     result.map(|()| out)
+}
+
+/// Controlling terminal used for status lines (opened once, lazily).
+static STATUS_TTY: OnceLock<Option<Tty>> = OnceLock::new();
+
+/// Writes a status/diagnostic line to the controlling terminal, falling back
+/// to stderr. stdout/stdin are reserved for data in file-transfer modes.
+pub fn status(msg: &str) {
+    match STATUS_TTY.get_or_init(|| Tty::open().ok()) {
+        Some(tty) => tty.write_all(msg.as_bytes()),
+        None => {
+            let _ = io::stderr().write_all(msg.as_bytes());
+        }
+    }
+}
+
+/// `eprintln!` replacement that prefers the tty over stderr.
+#[macro_export]
+macro_rules! status_ln {
+    () => {
+        $crate::hardening::secure_tty::status("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::hardening::secure_tty::status(&format!("{}\n", format_args!($($arg)*)))
+    };
 }

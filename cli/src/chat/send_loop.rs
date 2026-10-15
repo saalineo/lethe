@@ -78,7 +78,7 @@ pub fn run(queue: SyncSender<Frag>, username: &str) {
         }
 
         if line.len() > MAX_MESSAGE {
-            eprintln!("\r\n[!] message too long (max {} bytes)", MAX_MESSAGE);
+            crate::status_ln!("\r\n[!] message too long (max {} bytes)", MAX_MESSAGE);
             continue;
         }
 

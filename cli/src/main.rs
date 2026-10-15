@@ -17,45 +17,45 @@ use std::panic;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     panic::set_hook(Box::new(|info| {
-        eprintln!(
+        crate::status_ln!(
             "\n[CRITICAL] Panic detected at {:?}!",
             info.location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "unknown".to_string())
         );
         if let Some(s) = info.payload().downcast_ref::<&str>() {
-            eprintln!("[!] Message: {}", s);
+            crate::status_ln!("[!] Message: {}", s);
         } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            eprintln!("[!] Message: {}", s);
+            crate::status_ln!("[!] Message: {}", s);
         }
         shutdown::secure_shutdown();
     }));
 
     anti_debug::block_debugger();
     if let Err(e) = dump::disable_core_dumps() {
-        eprintln!("[!] Failed to disable core dumps: {}", e);
+        crate::status_ln!("[!] Failed to disable core dumps: {}", e);
     }
 
     watchdog::secure_launch(|| {
         if let Err(e) = namespace::isolate_environment() {
-            eprintln!("\x1b[1;31m[!] Access Denied: {}\x1b[0m", e);
-            eprintln!("\x1b[1;33m[i] Please apply capabilities instead of running as root:\x1b[0m");
-            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
+            crate::status_ln!("\x1b[1;31m[!] Access Denied: {}\x1b[0m", e);
+            crate::status_ln!("\x1b[1;33m[i] Please apply capabilities instead of running as root:\x1b[0m");
+            crate::status_ln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
             std::process::exit(1);
         }
 
         if let Err(e) = memory::lock_memory() {
-            eprintln!("\x1b[1;31m[!] Memory Lock Failed: {}\x1b[0m", e);
-            eprintln!("\x1b[1;33m[i] Missing cap_ipc_lock. Please apply capabilities:\x1b[0m");
-            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
+            crate::status_ln!("\x1b[1;31m[!] Memory Lock Failed: {}\x1b[0m", e);
+            crate::status_ln!("\x1b[1;33m[i] Missing cap_ipc_lock. Please apply capabilities:\x1b[0m");
+            crate::status_ln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
             std::process::exit(1);
         }
         if let Err(e) = seccomp::enforce_syscall_boundaries() {
-            eprintln!("\x1b[1;31m[!] Seccomp failed: {}\x1b[0m", e);
+            crate::status_ln!("\x1b[1;31m[!] Seccomp failed: {}\x1b[0m", e);
             std::process::exit(1);
         }
         if let Err(e) = signals::install_signal_handlers() {
-            eprintln!("\x1b[1;31m[!] Signal handlers failed: {}\x1b[0m", e);
+            crate::status_ln!("\x1b[1;31m[!] Signal handlers failed: {}\x1b[0m", e);
             std::process::exit(1);
         }
 
@@ -108,11 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        eprintln!(
+        crate::status_ln!(
             "\x1b[1;30m[+]\x1b[0m \x1b[32m{}\x1b[0m",
             obfstr!("SECURE ENVIRONMENT ACTIVE")
         );
-        eprintln!(
+        crate::status_ln!(
             "\x1b[1;30m[+]\x1b[0m \x1b[32mTransport: {} | Mode: {}\x1b[0m\n",
             addr,
             if is_server { "SERVER" } else { "CLIENT" }
@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pw = crypto::session::stretch(passphrase.as_bytes());
         drop(passphrase); // zeroized immediately
 
-        eprintln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
+        crate::status_ln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
 
         let transport = TransportHandle::load(&lib_path.to_string_lossy(), is_server, &addr)
             .map_err(|e| format!("transport init failed: {}", e))?;
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("key agreement failed: {}", e))?
         };
 
-        eprintln!("\x1b[1;30m[+]\x1b[0m Session Secured (SPAKE2 + Key Confirmation).");
+        crate::status_ln!("\x1b[1;30m[+]\x1b[0m Session Secured (SPAKE2 + Key Confirmation).");
 
         crypto::secret::set_session(session_keys);
         drop(pw);

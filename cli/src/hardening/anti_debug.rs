@@ -23,5 +23,5 @@ pub fn block_debugger() {
 
 #[cfg(debug_assertions)]
 pub fn block_debugger() {
-    eprintln!("\x1b[1;33m[WARN] Debug mode enabled: Anti-tamper/Debugger checks bypassed.\x1b[0m");
+    crate::status_ln!("\x1b[1;33m[WARN] Debug mode enabled: Anti-tamper/Debugger checks bypassed.\x1b[0m");
 }
