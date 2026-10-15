@@ -1,4 +1,73 @@
-use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall};
+use libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
+
+/// Which sandbox profile to load.
+pub enum Profile {
+    /// The network/crypto core.
+    Core,
+    /// The terminal UI: no files, sockets, threads or exec; I/O on two fds only.
+    Ui { ipc_fd: i32, tty_fd: i32 },
+}
+
+pub fn enforce(profile: Profile) -> Result<(), Box<dyn std::error::Error>> {
+    match profile {
+        Profile::Core => enforce_syscall_boundaries(),
+        Profile::Ui { ipc_fd, tty_fd } => {
+            let ctx = ui_profile(ipc_fd, tty_fd)?;
+            ctx.load()?;
+            Ok(())
+        }
+    }
+}
+
+fn ui_profile(ipc_fd: i32, tty_fd: i32) -> Result<ScmpFilterContext, Box<dyn std::error::Error>> {
+    let mut c = ScmpFilterContext::new_filter(ScmpAction::KillProcess)?;
+
+    for name in [
+        "poll", "ppoll", "exit", "exit_group", "brk", "munmap", "mremap", "futex",
+        "rt_sigreturn", "rt_sigprocmask", "clock_gettime", "getrandom", "mmap", "madvise",
+        "restart_syscall",
+    ] {
+        c.add_rule(ScmpAction::Allow, ScmpSyscall::from_name(name)?)?;
+    }
+
+    // Allocator growth may need mprotect, but never executable mappings.
+    c.add_rule_conditional(
+        ScmpAction::Allow,
+        ScmpSyscall::from_name("mprotect")?,
+        &[ScmpArgCompare::new(
+            2,
+            ScmpCompareOp::MaskedEqual(libc::PROT_EXEC as u64),
+            0,
+        )],
+    )?;
+
+    // read/write only on the two descriptors the UI owns.
+    for fd in [ipc_fd, tty_fd] {
+        for name in ["read", "write"] {
+            c.add_rule_conditional(
+                ScmpAction::Allow,
+                ScmpSyscall::from_name(name)?,
+                &[ScmpArgCompare::new(0, ScmpCompareOp::Equal, fd as u64)],
+            )?;
+        }
+    }
+
+    // termios and window size only.
+    for req in [
+        libc::TCGETS,
+        libc::TCSETS,
+        libc::TCSETSW,
+        libc::TCSETSF,
+        libc::TIOCGWINSZ,
+    ] {
+        c.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name("ioctl")?,
+            &[ScmpArgCompare::new(1, ScmpCompareOp::Equal, req as u64)],
+        )?;
+    }
+    Ok(c)
+}
 
 pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
     let mut isolation_context = ScmpFilterContext::new_filter(ScmpAction::Trap)?;
@@ -82,6 +151,7 @@ pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         libc::SYS_prctl as i32,
         libc::SYS_mlock as i32,
         libc::SYS_munlock as i32,
+        libc::SYS_wait4 as i32, // reap the UI child
     ];
 
     for &system_call_identifier in PERMITTED_SYSTEM_CALLS {
@@ -91,4 +161,59 @@ pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
 
     isolation_context.load()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Forks, applies the UI profile in the child and runs `body`; returns wait status.
+    fn run_sandboxed(body: fn(i32, i32)) -> i32 {
+        let mut fds = [0i32; 2];
+        // SAFETY: plain libc calls; the child only uses async-signal-safe operations.
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                // ipc_fd = write end, tty_fd = a second dup'd descriptor
+                let tty = libc::dup(fds[1]);
+                if enforce(Profile::Ui { ipc_fd: fds[1], tty_fd: tty }).is_err() {
+                    libc::_exit(90);
+                }
+                body(fds[1], tty);
+                libc::_exit(0);
+            }
+            let mut st = 0;
+            libc::waitpid(pid, &mut st, 0);
+            st
+        }
+    }
+
+    #[test]
+    fn ui_profile_allows_owned_fd_io() {
+        let st = run_sandboxed(|ipc, tty| unsafe {
+            libc::write(ipc, b"x".as_ptr() as *const _, 1);
+            libc::write(tty, b"y".as_ptr() as *const _, 1);
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "status {st}");
+    }
+
+    #[test]
+    fn ui_profile_kills_on_foreign_fd_and_open() {
+        let st = run_sandboxed(|_, _| unsafe {
+            libc::write(2, b"x".as_ptr() as *const _, 1); // fd 2 is not allowed
+        });
+        assert!(libc::WIFSIGNALED(st), "status {st}");
+
+        let st = run_sandboxed(|_, _| unsafe {
+            libc::open(c"/etc/passwd".as_ptr(), libc::O_RDONLY);
+        });
+        assert!(libc::WIFSIGNALED(st), "status {st}");
+
+        let st = run_sandboxed(|_, _| unsafe {
+            libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        });
+        assert!(libc::WIFSIGNALED(st), "status {st}");
+    }
 }
