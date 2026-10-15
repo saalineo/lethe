@@ -1,10 +1,10 @@
 [package]
-name = "sirfz-transport"
+name = "lethe-transport"
 version = "1.0.0"
 edition = "2024"
 
 [lib]
-name = "sirfz"
+name = "lethe"
 crate-type = ["cdylib"]
 
 [dependencies]

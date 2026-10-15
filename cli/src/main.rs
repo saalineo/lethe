@@ -6,7 +6,6 @@ mod shutdown;
 mod username;
 
 use chat::router::HostRouter;
-use crypto::ratchet::RatchetState;
 use ffi::transport::TransportHandle;
 use hardening::{anti_debug, dump, memory, namespace, seccomp, signals, watchdog};
 use obfstr::obfstr;
@@ -41,14 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = namespace::isolate_environment() {
             eprintln!("\x1b[1;31m[!] Access Denied: {}\x1b[0m", e);
             eprintln!("\x1b[1;33m[i] Please apply capabilities instead of running as root:\x1b[0m");
-            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/sirfz");
+            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
             std::process::exit(1);
         }
 
         if let Err(e) = memory::lock_memory() {
             eprintln!("\x1b[1;31m[!] Memory Lock Failed: {}\x1b[0m", e);
             eprintln!("\x1b[1;33m[i] Missing cap_ipc_lock. Please apply capabilities:\x1b[0m");
-            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/sirfz");
+            eprintln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
             std::process::exit(1);
         }
         if let Err(e) = seccomp::enforce_syscall_boundaries() {
@@ -75,12 +74,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or_else(|| {
-                if std::path::Path::new("./libsirfz.so").exists() {
+                if std::path::Path::new("./liblethe.so").exists() {
+                    "./liblethe.so"
+                } else if std::path::Path::new("./libsirfz.so").exists() {
                     "./libsirfz.so"
                 } else if std::path::Path::new("./libtransport.so").exists() {
                     "./libtransport.so"
                 } else {
-                    "../libtransport/target/release/libsirfz.so"
+                    "../libtransport/target/release/liblethe.so"
                 }
             });
 
@@ -124,8 +125,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("transport init failed: {}", e))?;
 
         let root_key = [0x42u8; 32];
-        let send_ratchet = RatchetState::new(root_key);
-        let recv_ratchet = Arc::new(Mutex::new(RatchetState::new(root_key)));
+        let session_keys = crypto::ratchet::SessionKeys::from_shared_secret(&root_key, is_server)
+            .map_err(|e| format!("session keys derivation failed: {}", e))?;
+        let (send_ratchet, recv_chain) = session_keys.into_parts();
+        let recv_ratchet = Arc::new(Mutex::new(recv_chain));
 
         let router = HostRouter::new(transport);
         chat::terminal::run(router, send_ratchet, recv_ratchet, my_username);

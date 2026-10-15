@@ -6,7 +6,7 @@ use crate::hardening::input::read_line_raw;
 
 pub fn run(router: &HostRouter, send_ratchet: &mut RatchetState, username: &str) {
     loop {
-        print!("\x1b[1;31m[\x1b[0m\x1b[1;35m{}@sirfz\x1b[0m\x1b[1;31m]\x1b[0m\x1b[1;34m~\x1b[0m\x1b[1;31m#\x1b[0m ", username);
+        print!("\x1b[1;31m[\x1b[0m\x1b[1;35m{}@lethe\x1b[0m\x1b[1;31m]\x1b[0m\x1b[1;34m~\x1b[0m\x1b[1;31m#\x1b[0m ", username);
         if stdout().flush().is_err() {
             break;
         }

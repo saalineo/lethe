@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-echo "[*] Setting capabilities on SIRFZ binary..."
-TARGET_BIN="target/release/sirfz"
+echo "[*] Setting capabilities on LETHE binary..."
+TARGET_BIN="target/release/lethe"
 
 if [ ! -f "$TARGET_BIN" ]; then
     echo "[!] Target binary $TARGET_BIN not found. Did you run 'cargo build --release'?"
-    TARGET_BIN="target/debug/sirfz"
+    TARGET_BIN="target/debug/lethe"
     if [ ! -f "$TARGET_BIN" ]; then
         exit 1
     fi

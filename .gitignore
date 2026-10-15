@@ -1,5 +1,5 @@
 # ==============================================================================
-# SIRFZ .gitignore
+# LETHE .gitignore
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -8,7 +8,7 @@
 /target/
 **/target/
 Cargo.lock
-client/Cargo.lock
+cli/Cargo.lock
 libtransport/Cargo.lock
 **/*.rs.bk
 
@@ -23,6 +23,8 @@ libtransport/Cargo.lock
 *.dll
 *.exe
 *.out
+lethe
+liblethe.so
 libsirfz.so
 libtransport.so
 
