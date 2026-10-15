@@ -151,13 +151,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crypto::secret::set_session(session_keys);
         drop(pw);
 
-        let router = HostRouter::new(transport);
-        chat::terminal::run(router);
+        match mode {
+            mode::Mode::Chat => {
+                let router = HostRouter::new(transport);
+                chat::terminal::run(router);
+            }
+            mode::Mode::SendStdin => {
+                let code = transfer::run_send(
+                    std::sync::Arc::new(transport),
+                    std::sync::Arc::new(crypto::secret::GlobalSession),
+                    std::io::stdin().lock(),
+                    transfer::ACK_TIMEOUT,
+                    Some(proto::file::EXIT_TRUNCATED),
+                );
+                finish_transfer("sent", code);
+            }
+            mode::Mode::RecvStdout => {
+                let code = transfer::run_recv(
+                    std::sync::Arc::new(transport),
+                    std::sync::Arc::new(crypto::secret::GlobalSession),
+                    std::io::stdout().lock(),
+                    Some(proto::file::EXIT_TRUNCATED),
+                );
+                finish_transfer("received", code);
+            }
+        }
 
         Ok(())
     });
 
     Ok(())
+}
+
+/// Reports the verdict on the tty (never stdout) and exits with its code.
+fn finish_transfer(verb: &str, code: i32) -> ! {
+    match code {
+        proto::file::EXIT_OK => crate::status_ln!("\x1b[1;32m[+] file {verb}, hash verified\x1b[0m"),
+        proto::file::EXIT_MISMATCH => {
+            crate::status_ln!("\x1b[1;31m[!] integrity failure (hash mismatch / bad frame)\x1b[0m")
+        }
+        proto::file::EXIT_TRUNCATED => {
+            crate::status_ln!("\x1b[1;31m[!] connection closed before transfer completed\x1b[0m")
+        }
+        _ => crate::status_ln!("\x1b[1;31m[!] local I/O error\x1b[0m"),
+    }
+    shutdown::secure_shutdown_with(code);
+    std::process::exit(code)
 }
 
 fn read_address_from_tty(is_server: bool) -> String {
