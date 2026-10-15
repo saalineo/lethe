@@ -1,14 +1,20 @@
+use crate::crypto::secret::SESSION;
 use crate::hardening::memory;
 use std::process;
-use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{Ordering, compiler_fence};
 
 static SHUTDOWN_ONCE: Once = Once::new();
 
 pub fn secure_shutdown() {
     SHUTDOWN_ONCE.call_once(|| {
-        eprintln!("\n[!] Secure shutdown initiated. Wiping memory...");
+        eprintln!(
+            "\n[!] Secure shutdown initiated. Zeroizing session keys and unlocking memory..."
+        );
 
+        if let Ok(mut g) = SESSION.lock() {
+            g.take(); // ZeroizeOnDrop runs here
+        }
         compiler_fence(Ordering::SeqCst);
         memory::unlock_memory();
 

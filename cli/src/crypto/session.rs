@@ -70,11 +70,11 @@ pub fn agree<S: Read + Write>(io: &mut S, role: Role, pw: &[u8; 32]) -> io::Resu
     io.write_all(&msg)?; // msg is 33 bytes
     io.flush()?;
 
-    let mut peer = [0u8; 33];
-    io.read_exact(&mut peer)?;
+    let mut peer = Zeroizing::new([0u8; 33]);
+    io.read_exact(&mut *peer)?;
     let shared = Zeroizing::new(
         state
-            .finish(&peer)
+            .finish(&*peer)
             .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "pake"))?,
     );
 

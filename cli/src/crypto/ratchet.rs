@@ -43,10 +43,12 @@ impl Chain {
     }
 
     // Compatibility aliases
+    #[allow(dead_code)]
     pub fn encrypt(&mut self, pt: &[u8]) -> Result<Vec<u8>, &'static str> {
         self.seal(pt)
     }
 
+    #[allow(dead_code)]
     pub fn decrypt(&mut self, ct: &[u8]) -> Result<Vec<u8>, &'static str> {
         self.open(ct)
     }
@@ -62,6 +64,7 @@ impl std::fmt::Debug for Chain {
 
 use crate::crypto::session::Role;
 
+#[allow(dead_code)]
 pub type RatchetState = Chain;
 
 /// Holds directional session keys (D3).
@@ -81,6 +84,7 @@ impl std::fmt::Debug for SessionKeys {
 }
 
 impl SessionKeys {
+    #[allow(dead_code)]
     pub fn into_parts(self) -> (Chain, Chain) {
         (self.send, self.recv)
     }

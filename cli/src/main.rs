@@ -11,7 +11,6 @@ use hardening::{anti_debug, dump, memory, namespace, seccomp, signals, watchdog}
 use obfstr::obfstr;
 use std::env;
 use std::panic;
-use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -130,11 +129,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("\x1b[1;30m[+]\x1b[0m Session Secured (SPAKE2 + Key Confirmation).");
 
-        let (send_ratchet, recv_chain) = session_keys.into_parts();
-        let recv_ratchet = Arc::new(Mutex::new(recv_chain));
+        crypto::secret::set_session(session_keys);
+        drop(pw);
 
         let router = HostRouter::new(transport);
-        chat::terminal::run(router, send_ratchet, recv_ratchet, my_username);
+        chat::terminal::run(router, my_username);
 
         Ok(())
     });
