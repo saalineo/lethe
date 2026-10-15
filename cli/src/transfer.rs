@@ -150,6 +150,32 @@ mod tests {
         assert_eq!(*sink.lock().unwrap(), data);
     }
 
+    /// ~10 s: 50 KB at one 492-byte cell per 100 ms. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn large_transfer_is_bit_exact() {
+        let Some(lib_path) = lib() else { return };
+        let (server, client) = pair(lib_path);
+        let (k_a, k_b) = ([5u8; 32], [6u8; 32]);
+        let data: Vec<u8> = (0..50_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+            .collect();
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = Arc::clone(&sink);
+        let recv = thread::spawn(move || {
+            run_recv(server, Arc::new(LocalKeys::new(k_b, k_a)), Shared(s2), None)
+        });
+        let code = run_send(
+            client,
+            Arc::new(LocalKeys::new(k_a, k_b)),
+            &data[..],
+            Duration::from_secs(10),
+            None,
+        );
+        assert_eq!((code, recv.join().unwrap()), (EXIT_OK, EXIT_OK));
+        assert_eq!(*sink.lock().unwrap(), data);
+    }
+
     #[test]
     fn truncated_stream_reports_exit_3() {
         let Some(lib_path) = lib() else { return };
