@@ -1,5 +1,58 @@
 use crate::crypto::ratchet::SessionKeys;
 use std::sync::Mutex;
+use zeroize::Zeroize;
+
+/// Upper bound on secret input length (bytes).
+pub const SECRET_MAX: usize = 256;
+
+/// Fixed-size, RAM-locked buffer for secrets (e.g. a typed passphrase).
+///
+/// The backing storage is a single allocation that is never reallocated, is
+/// `mlock`ed so it cannot be swapped out, and is zeroized on drop.
+pub struct SecretBuf {
+    buf: Box<[u8; SECRET_MAX]>,
+    len: usize,
+}
+
+impl SecretBuf {
+    pub fn new() -> Self {
+        let buf = Box::new([0u8; SECRET_MAX]);
+        // SAFETY: pointer/length describe the live heap allocation owned by `buf`.
+        // Best effort: mlockall may not be active yet (UI process, tests).
+        unsafe { libc::mlock(buf.as_ptr() as *const _, SECRET_MAX) };
+        Self { buf, len: 0 }
+    }
+
+    /// Appends a byte; returns `false` if the buffer is full.
+    pub fn push(&mut self, b: u8) -> bool {
+        if self.len == SECRET_MAX {
+            return false;
+        }
+        self.buf[self.len] = b;
+        self.len += 1;
+        true
+    }
+
+    /// Removes the last byte, wiping its slot.
+    pub fn pop(&mut self) {
+        if self.len > 0 {
+            self.len -= 1;
+            self.buf[self.len] = 0;
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl Drop for SecretBuf {
+    fn drop(&mut self) {
+        self.buf.zeroize();
+        // SAFETY: same allocation that was locked in `new`.
+        unsafe { libc::munlock(self.buf.as_ptr() as *const _, SECRET_MAX) };
+    }
+}
 
 /// Global centralized session storage for ZeroizeOnDrop on shutdown (D9).
 pub static SESSION: Mutex<Option<SessionKeys>> = Mutex::new(None);
@@ -49,6 +102,22 @@ pub fn wipe_session() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_secretbuf_push_pop_and_cap() {
+        let mut s = SecretBuf::new();
+        assert!(s.as_bytes().is_empty());
+        for b in b"abc" {
+            assert!(s.push(*b));
+        }
+        assert_eq!(s.as_bytes(), b"abc");
+        s.pop();
+        assert_eq!(s.as_bytes(), b"ab");
+        assert_eq!(s.buf[2], 0, "popped slot must be wiped");
+        while s.push(b'x') {}
+        assert_eq!(s.as_bytes().len(), SECRET_MAX);
+        assert!(!s.push(b'y'));
+    }
     use crate::crypto::session::Role;
 
     #[test]
