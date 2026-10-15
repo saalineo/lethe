@@ -1,7 +1,9 @@
 # LETHE
-
-![Logo Description](res/lethe.svg)
-
+<div align="center">
+  <img src="res/lethe.svg" alt="LETHE Logo" width="300" />
+  
+  <h1>LETHE</h1>
+</div>
 Ephemeral State-Machine Chat Terminal. Forensically deniable, zero filesystem footprint, locked-RAM messenger.
 
 ## What it does

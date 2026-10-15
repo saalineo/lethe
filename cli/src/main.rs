@@ -9,7 +9,6 @@ use chat::router::HostRouter;
 use ffi::transport::TransportHandle;
 use hardening::{anti_debug, dump, memory, namespace, seccomp, signals, watchdog};
 use obfstr::obfstr;
-use sha2::Digest;
 use std::env;
 use std::panic;
 use std::sync::{Arc, Mutex};
@@ -95,38 +94,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_server { "SERVER" } else { "CLIENT" }
         );
 
-        let mut auth_key = [0u8; 32];
-        loop {
-            eprint!("\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Session PIN:\x1b[0m ");
-            let mut pin = hardening::input::read_pin_stealth();
+        let pw = loop {
+            eprint!("\x1b[1;31m>\x1b[0m \x1b[1;33mEnter Session Passphrase:\x1b[0m ");
+            let mut passphrase = hardening::input::read_pin_stealth();
             eprintln!(); // newline after stealth reading
 
-            let trimmed = pin.trim();
+            let trimmed = passphrase.trim();
             if trimmed.is_empty() {
-                eprintln!("\x1b[1;31m[!] PIN cannot be empty. Please try again.\x1b[0m");
+                eprintln!("\x1b[1;31m[!] Passphrase cannot be empty. Please try again.\x1b[0m");
                 continue;
             }
 
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(trimmed.as_bytes());
-            let result = hasher.finalize();
-            auth_key.copy_from_slice(&result);
+            let stretched = crypto::session::stretch(trimmed.as_bytes());
+            passphrase.zeroize();
+            break stretched;
+        };
 
-            pin.zeroize();
-            break;
-        }
-
-        eprintln!("\x1b[1;30m[+]\x1b[0m Session Secured.");
+        eprintln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
 
         let my_username = username::generate_username();
-        eprintln!("\n\x1b[1;30m[+]\x1b[0m \x1b[32mAssigned Alias: {}\x1b[0m\n", my_username);
+        eprintln!(
+            "\n\x1b[1;30m[+]\x1b[0m \x1b[32mAssigned Alias: {}\x1b[0m\n",
+            my_username
+        );
 
-        let transport = TransportHandle::load(lib_path, is_server, addr, &auth_key)
+        let transport = TransportHandle::load(lib_path, is_server, addr)
             .map_err(|e| format!("transport init failed: {}", e))?;
 
-        let root_key = [0x42u8; 32];
-        let session_keys = crypto::ratchet::SessionKeys::from_shared_secret(&root_key, is_server)
-            .map_err(|e| format!("session keys derivation failed: {}", e))?;
+        let role = crypto::session::Role::from_is_server(is_server);
+        let session_keys = {
+            let mut io = transport.io();
+            crypto::session::agree(&mut io, role, &pw)
+                .map_err(|e| format!("key agreement failed: {}", e))?
+        };
+
+        eprintln!("\x1b[1;30m[+]\x1b[0m Session Secured (SPAKE2 + Key Confirmation).");
+
         let (send_ratchet, recv_chain) = session_keys.into_parts();
         let recv_ratchet = Arc::new(Mutex::new(recv_chain));
 

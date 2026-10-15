@@ -3,7 +3,7 @@ use std::os::raw::{c_char, c_int, c_uchar};
 
 use libloading::{Library, Symbol};
 
-type FnStartNode = unsafe extern "C" fn(c_int, *const c_char, *const c_uchar) -> c_int;
+type FnStartNode = unsafe extern "C" fn(c_int, *const c_char) -> c_int;
 type FnSendMessage = unsafe extern "C" fn(c_int, *const c_uchar, c_int) -> c_int;
 type FnRecvMessage = unsafe extern "C" fn(c_int, c_int, *mut c_uchar, c_int) -> c_int;
 type FnStopNode = unsafe extern "C" fn(c_int);
@@ -52,17 +52,10 @@ impl LoadedSymbols {
         &self,
         is_server: bool,
         addr: &str,
-        auth_key: &[u8; 32],
     ) -> Result<i32, Box<dyn std::error::Error>> {
         let c_addr = CString::new(addr)?;
         // SAFETY: Invoking C function pointer with valid pointer parameters.
-        let handle = unsafe {
-            (self.start_node)(
-                if is_server { 1 } else { 0 },
-                c_addr.as_ptr(),
-                auth_key.as_ptr(),
-            )
-        };
+        let handle = unsafe { (self.start_node)(if is_server { 1 } else { 0 }, c_addr.as_ptr()) };
         if handle < 0 {
             return Err("StartNode returned error".into());
         }
@@ -71,13 +64,7 @@ impl LoadedSymbols {
 
     pub fn send(&self, node_handle: c_int, data: &[u8]) -> i32 {
         // SAFETY: Passing valid slice pointer and length to FFI function.
-        unsafe {
-            (self.send_message)(
-                node_handle,
-                data.as_ptr(),
-                data.len() as c_int,
-            )
-        }
+        unsafe { (self.send_message)(node_handle, data.as_ptr(), data.len() as c_int) }
     }
 
     pub fn recv(&self, node_handle: c_int, stream_idx: i32, buf: &mut [u8]) -> i32 {

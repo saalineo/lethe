@@ -1,5 +1,3 @@
-mod handshake;
-
 use std::ffi::CStr;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -176,51 +174,33 @@ unsafe fn slice_from_ptr_mut<'a>(ptr: *mut c_uchar, len: usize) -> Option<&'a mu
 /// # Safety
 ///
 /// - `addr` must be a valid null-terminated C string pointer.
-/// - `auth_key` must point to a 32-byte authorization key buffer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn StartNode(
-    is_server: c_int,
-    addr: *const c_char,
-    auth_key: *const c_uchar,
-) -> c_int {
+pub unsafe extern "C" fn StartNode(is_server: c_int, addr: *const c_char) -> c_int {
     std::panic::catch_unwind(|| {
         // SAFETY: Delegating to `cstr_to_str` which verifies nullness.
         let addr_str = unsafe { cstr_to_str(addr) }.unwrap_or("0.0.0.0:9000");
-        // SAFETY: Delegating to `slice_from_ptr` which verifies nullness.
-        let key_slice = match unsafe { slice_from_ptr(auth_key, 32) } {
-            Some(s) => s,
-            None => return -1,
-        };
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(key_slice);
 
         let result = if is_server != 0 {
-            start_server(addr_str, &key)
+            start_server(addr_str)
         } else {
-            start_client(addr_str, &key)
+            start_client(addr_str)
         };
 
-        key.zeroize();
         result.unwrap_or(-1)
     })
     .unwrap_or(-1)
 }
 
-fn start_server(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
+fn start_server(addr: &str) -> io::Result<c_int> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(false)?;
 
-    let (mut stream, _) = listener.accept()?;
-    handshake::server(&mut stream, auth_key)?;
-
+    let (stream, _) = listener.accept()?;
     alloc_handle(stream)
 }
 
-fn start_client(addr: &str, auth_key: &[u8; 32]) -> io::Result<c_int> {
-    let mut stream = TcpStream::connect(addr)?;
-    handshake::client(&mut stream, auth_key)?;
-
+fn start_client(addr: &str) -> io::Result<c_int> {
+    let stream = TcpStream::connect(addr)?;
     alloc_handle(stream)
 }
 
@@ -403,18 +383,15 @@ mod tests {
     #[test]
     fn test_full_duplex_concurrency() {
         let _guard = lock_test();
-        let auth_key = [7u8; 32];
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server_thread = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake::server(&mut stream, &auth_key).unwrap();
+            let (stream, _) = listener.accept().unwrap();
             alloc_handle(stream).unwrap()
         });
 
-        let mut client_stream = TcpStream::connect(addr).unwrap();
-        handshake::client(&mut client_stream, &auth_key).unwrap();
+        let client_stream = TcpStream::connect(addr).unwrap();
         let client_handle = alloc_handle(client_stream).unwrap();
         let server_handle = server_thread.join().unwrap();
 
@@ -475,18 +452,15 @@ mod tests {
     #[test]
     fn test_shutdown_unblocks_blocked_reader() {
         let _guard = lock_test();
-        let auth_key = [9u8; 32];
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server_thread = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake::server(&mut stream, &auth_key).unwrap();
+            let (stream, _) = listener.accept().unwrap();
             alloc_handle(stream).unwrap()
         });
 
-        let mut client_stream = TcpStream::connect(addr).unwrap();
-        handshake::client(&mut client_stream, &auth_key).unwrap();
+        let client_stream = TcpStream::connect(addr).unwrap();
         let client_handle = alloc_handle(client_stream).unwrap();
         let server_handle = server_thread.join().unwrap();
 

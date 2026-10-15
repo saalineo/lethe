@@ -52,6 +52,16 @@ impl Chain {
     }
 }
 
+impl std::fmt::Debug for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chain")
+            .field("counter", &self.counter)
+            .finish_non_exhaustive()
+    }
+}
+
+use crate::crypto::session::Role;
+
 pub type RatchetState = Chain;
 
 /// Holds directional session keys (D3).
@@ -61,31 +71,53 @@ pub struct SessionKeys {
     pub recv: Chain,
 }
 
+impl std::fmt::Debug for SessionKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionKeys")
+            .field("send", &self.send)
+            .field("recv", &self.recv)
+            .finish()
+    }
+}
+
 impl SessionKeys {
     pub fn into_parts(self) -> (Chain, Chain) {
         (self.send, self.recv)
     }
-    /// Derives directional chains based on node role (client vs server)
-    pub fn from_shared_secret(shared_secret: &[u8; 32], is_server: bool) -> Result<Self, &'static str> {
+
+    /// Derives directional chains from a shared secret and role.
+    pub fn from_shared(shared_secret: &[u8], role: Role) -> Self {
         let hk = Hkdf::<Sha256>::new(Some(b"lethe-v2"), shared_secret);
         let mut k_c2s = Zeroizing::new([0u8; 32]);
         let mut k_s2c = Zeroizing::new([0u8; 32]);
 
-        hk.expand(b"c2s", &mut *k_c2s)
-            .map_err(|_| "HKDF expand failed for c2s")?;
-        hk.expand(b"s2c", &mut *k_s2c)
-            .map_err(|_| "HKDF expand failed for s2c")?;
+        // HKDF-Expand with 32-byte outputs on Sha256 never fails.
+        let _ = hk.expand(b"c2s", &mut *k_c2s);
+        let _ = hk.expand(b"s2c", &mut *k_s2c);
 
-        let (send_key, recv_key) = if is_server {
-            (*k_s2c, *k_c2s) // Server sends s2c, receives c2s
-        } else {
-            (*k_c2s, *k_s2c) // Client sends c2s, receives s2c
+        let (send_key, recv_key) = match role {
+            Role::Responder => (*k_s2c, *k_c2s), // Server sends s2c, receives c2s
+            Role::Initiator => (*k_c2s, *k_s2c), // Client sends c2s, receives s2c
         };
 
-        Ok(Self {
+        Self {
             send: Chain::new(send_key),
             recv: Chain::new(recv_key),
-        })
+        }
+    }
+
+    /// Derives directional chains based on node role (client vs server)
+    #[allow(dead_code)]
+    pub fn from_shared_secret(
+        shared_secret: &[u8; 32],
+        is_server: bool,
+    ) -> Result<Self, &'static str> {
+        let role = if is_server {
+            Role::Responder
+        } else {
+            Role::Initiator
+        };
+        Ok(Self::from_shared(shared_secret, role))
     }
 }
 

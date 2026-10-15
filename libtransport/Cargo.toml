@@ -8,7 +8,5 @@ name = "lethe"
 crate-type = ["cdylib"]
 
 [dependencies]
-hmac = "0.12"
-sha2 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
-getrandom = "0.2"
+
