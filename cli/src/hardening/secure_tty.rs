@@ -4,7 +4,7 @@ use libc::{
     tcgetattr, tcsetattr, termios, write,
 };
 use std::io::{self, Write};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use zeroize::Zeroize;
 
 /// Terminal state to restore on abnormal exit paths (signals, panic hook),
@@ -39,6 +39,10 @@ impl Tty {
             return Err(io::Error::last_os_error());
         }
         Ok(Self { fd })
+    }
+
+    pub fn fd(&self) -> libc::c_int {
+        self.fd
     }
 
     pub fn write_all(&self, mut s: &[u8]) {
@@ -131,13 +135,30 @@ pub fn read_secret(tty: &Tty, prompt: &str) -> io::Result<SecretBuf> {
     result.map(|()| out)
 }
 
-/// Controlling terminal used for status lines (opened once, lazily).
-static STATUS_TTY: OnceLock<Option<Tty>> = OnceLock::new();
+/// Controlling terminal used for status lines (opened lazily, closable).
+static STATUS_TTY: Mutex<Option<Tty>> = Mutex::new(None);
+static STATUS_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Writes a status/diagnostic line to the controlling terminal, falling back
-/// to stderr. stdout/stdin are reserved for data in file-transfer modes.
+/// Drops the core's status terminal handle: once the UI owns the terminal the
+/// core never writes to it again.
+pub fn close_status_tty() {
+    *STATUS_TTY.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    STATUS_TRIED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Writes a status/diagnostic line: to the UI process when one is attached,
+/// else to the controlling terminal, else stderr. stdout/stdin are reserved
+/// for data in file-transfer modes.
 pub fn status(msg: &str) {
-    match STATUS_TTY.get_or_init(|| Tty::open().ok()) {
+    let text = msg.strip_suffix('\n').unwrap_or(msg);
+    if super::sandbox_ui::send_to_ui(crate::ipc::CoreToUi::Status as u8, text.as_bytes()) {
+        return;
+    }
+    let mut g = STATUS_TTY.lock().unwrap_or_else(|p| p.into_inner());
+    if g.is_none() && !STATUS_TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        *g = Tty::open().ok();
+    }
+    match g.as_ref() {
         Some(tty) => tty.write_all(msg.as_bytes()),
         None => {
             let _ = io::stderr().write_all(msg.as_bytes());

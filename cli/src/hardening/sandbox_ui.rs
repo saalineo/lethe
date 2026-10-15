@@ -8,6 +8,8 @@ use super::seccomp::{self, Profile};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
+use std::time::Duration;
 
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
@@ -141,6 +143,50 @@ pub fn spawn_ui(tty_fd: i32) -> io::Result<(UnixStream, libc::pid_t)> {
             crate::ui::run(ui_end, tty_fd)
         }
         pid => Ok((core_end, pid)),
+    }
+}
+
+/// The core's live connection to the UI (set once the UI owns the terminal).
+struct Link {
+    writer: UnixStream,
+    pid: libc::pid_t,
+}
+
+static LINK: Mutex<Option<Link>> = Mutex::new(None);
+
+/// Registers the UI connection; from now on status output goes through IPC.
+pub fn attach(writer: UnixStream, pid: libc::pid_t) {
+    *LINK.lock().unwrap_or_else(|p| p.into_inner()) = Some(Link { writer, pid });
+}
+
+/// Sends one frame to the UI; `false` if no UI is attached or the send failed.
+pub fn send_to_ui(tag: u8, body: &[u8]) -> bool {
+    let Ok(mut g) = LINK.try_lock() else {
+        return false;
+    };
+    match g.as_mut() {
+        Some(l) => crate::ipc::send(&mut l.writer, tag, &body[..body.len().min(crate::ipc::MAX_FRAME)])
+            .is_ok(),
+        None => false,
+    }
+}
+
+/// Tells the UI to restore the terminal and exit, then reaps it (bounded wait).
+pub fn shutdown_ui() {
+    let Ok(mut g) = LINK.try_lock() else {
+        return;
+    };
+    if let Some(l) = g.as_mut() {
+        let _ = crate::ipc::send(&mut l.writer, crate::ipc::CoreToUi::Shutdown as u8, &[]);
+        for _ in 0..50 {
+            let mut st = 0;
+            // SAFETY: reaping our own child with WNOHANG.
+            let r = unsafe { libc::waitpid(l.pid, &mut st, libc::WNOHANG) };
+            if r != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 

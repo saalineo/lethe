@@ -17,6 +17,7 @@ pub fn secure_shutdown_with(code: i32) {
             "\n[!] Secure shutdown initiated. Zeroizing session keys and unlocking memory..."
         );
 
+        crate::hardening::sandbox_ui::shutdown_ui();
         secure_tty::restore_saved_termios();
 
         if let Ok(mut g) = SESSION.lock() {
