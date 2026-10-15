@@ -1,4 +1,3 @@
-use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::thread;
 
@@ -68,8 +67,8 @@ pub fn run(
     }
 }
 
-/// Chat mode: prints reassembled messages; any end of the loop is a shutdown.
-pub fn spawn(transport: Arc<TransportHandle>, username: String) {
+/// Chat mode: hands each reassembled message to `sink`; any end is a shutdown.
+pub fn spawn(transport: Arc<TransportHandle>, sink: Arc<dyn Fn(&[u8]) + Send + Sync>) {
     thread::spawn(move || {
         let mut asm = Reassembler::new();
         let end = run(&transport, &crate::crypto::secret::GlobalSession, |frag| {
@@ -77,12 +76,7 @@ pub fn spawn(transport: Arc<TransportHandle>, username: String) {
                 return Ok(Flow::Continue); // file kinds are not part of chat
             }
             if let Some((_, msg)) = asm.push(frag).map_err(|_| ())? {
-                let msg = String::from_utf8_lossy(&msg);
-                print!(
-                    "\r\x1b[K\x1b[1;30m[\x1b[0m\x1b[1;32mPEER\x1b[0m\x1b[1;30m]\x1b[0m \x1b[32m{}\x1b[0m\n\x1b[1;31m[\x1b[0m\x1b[1;35m{}@lethe\x1b[0m\x1b[1;31m]\x1b[0m\x1b[1;34m~\x1b[0m\x1b[1;31m#\x1b[0m ",
-                    msg, username
-                );
-                let _ = stdout().flush();
+                sink(&msg);
             }
             Ok(Flow::Continue)
         });

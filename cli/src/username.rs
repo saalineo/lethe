@@ -1,11 +1,5 @@
 use rand::seq::SliceRandom;
 
-/// Detects whether either stdin or stdout is redirected / piped.
-pub fn is_pipe_mode() -> bool {
-    // SAFETY: isatty is a safe libc query checking if file descriptors are terminals.
-    unsafe { libc::isatty(libc::STDIN_FILENO) == 0 || libc::isatty(libc::STDOUT_FILENO) == 0 }
-}
-
 /// Terminal access used by the questionnaire (so the UI can supply its own fds).
 pub trait Prompter {
     fn write(&mut self, s: &str);
@@ -27,6 +21,7 @@ fn ask(io: &mut dyn Prompter, prompt: &str, valid: &[&str], default: &str) -> St
 }
 
 /// Generate a default username without interactive prompts.
+#[cfg(test)]
 pub fn generate_default_username() -> String {
     let base = choose_word("dark", "short");
     apply_transformation(&base, "subtle")
@@ -360,12 +355,6 @@ mod tests {
 
         let mut eof = Scripted { answers: vec![], written: String::new() };
         assert!(!generate_username_with(&mut eof).is_empty());
-    }
-
-    #[test]
-    fn test_is_pipe_mode() {
-        // Calling is_pipe_mode must not panic or cause undefined behavior.
-        let _ = is_pipe_mode();
     }
 
     #[test]

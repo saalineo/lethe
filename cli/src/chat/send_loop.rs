@@ -1,14 +1,11 @@
-use std::io::{Write, stdout};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
 use crate::ffi::transport::TransportHandle;
-use crate::hardening::input::read_line_raw;
-use crate::proto::cell::{CellKeys, Frag, Kind};
-use crate::proto::frame;
-use crate::proto::params::{MAX_MESSAGE, TICK};
+use crate::proto::cell::{CellKeys, Frag};
+use crate::proto::params::TICK;
 
 /// Pending fragments waiting for a transmit slot (backpressure on the UI).
 pub const QUEUE_DEPTH: usize = 1024;
@@ -56,46 +53,12 @@ pub fn spawn_scheduler(
     })
 }
 
-/// UI side: reads whole lines and queues their fragments; never touches the wire.
-pub fn run(queue: SyncSender<Frag>, username: &str) {
-    loop {
-        print!(
-            "\x1b[1;31m[\x1b[0m\x1b[1;35m{}@lethe\x1b[0m\x1b[1;31m]\x1b[0m\x1b[1;34m~\x1b[0m\x1b[1;31m#\x1b[0m ",
-            username
-        );
-        if stdout().flush().is_err() {
-            break;
-        }
-        let line = read_line_raw();
-
-        if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
-            crate::shutdown::secure_shutdown();
-            break;
-        }
-
-        if line.is_empty() {
-            continue;
-        }
-
-        if line.len() > MAX_MESSAGE {
-            crate::status_ln!("\r\n[!] message too long (max {} bytes)", MAX_MESSAGE);
-            continue;
-        }
-
-        for f in frame::fragment(Kind::Chat, line.as_bytes()) {
-            if queue.send(f).is_err() {
-                return;
-            }
-        }
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::ratchet::Chain;
-    use crate::proto::cell::LocalKeys;
+    use crate::proto::cell::{Kind, LocalKeys};
+    use crate::proto::frame;
     use crate::proto::params::CELL_LEN;
     use std::sync::mpsc::sync_channel;
     use std::time::Duration;

@@ -52,7 +52,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             crate::status_ln!("    sudo setcap cap_ipc_lock,cap_sys_admin+ep target/release/lethe");
             std::process::exit(1);
         }
-        if let Err(e) = seccomp::enforce_syscall_boundaries() {
+        let args: Vec<String> = env::args().collect();
+        let is_server = args.iter().any(|a| a == "--server");
+        let mode = mode::detect(&args);
+
+        // The terminal handle (passphrase prompt) and the UI fork both need
+        // privileges the core profile will not allow, so they happen first.
+        let tty = hardening::secure_tty::Tty::open()
+            .map_err(|e| format!("no controlling terminal: {e}"))?;
+        let ui = if mode == mode::Mode::Chat {
+            Some(
+                hardening::sandbox_ui::spawn_ui(tty.fd())
+                    .map_err(|e| format!("failed to start sandboxed UI: {e}"))?,
+            )
+        } else {
+            None
+        };
+
+        if let Err(e) = seccomp::enforce(seccomp::Profile::Core) {
             crate::status_ln!("\x1b[1;31m[!] Seccomp failed: {}\x1b[0m", e);
             std::process::exit(1);
         }
@@ -60,11 +77,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             crate::status_ln!("\x1b[1;31m[!] Signal handlers failed: {}\x1b[0m", e);
             std::process::exit(1);
         }
-
-        let args: Vec<String> = env::args().collect();
-        let is_server = args.iter().any(|a| a == "--server");
-
-        let mode = mode::detect(&args);
 
         let explicit_addr = args
             .iter()
@@ -120,9 +132,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_server { "SERVER" } else { "CLIENT" }
         );
 
-        let tty = hardening::secure_tty::Tty::open()
-            .map_err(|e| format!("no controlling terminal: {e}"))?;
-
         let passphrase = loop {
             let s = hardening::secure_tty::read_secret(
                 &tty,
@@ -135,6 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let pw = crypto::session::stretch(passphrase.as_bytes());
         drop(passphrase); // zeroized immediately
+        drop(tty); // the core never reads the terminal again
 
         crate::status_ln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
 
@@ -155,8 +165,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match mode {
             mode::Mode::Chat => {
+                let (ui_stream, ui_pid) = ui.expect("UI is spawned in chat mode");
                 let router = HostRouter::new(transport);
-                chat::terminal::run(router);
+                chat::terminal::run(router, ui_stream, ui_pid);
             }
             mode::Mode::SendStdin => {
                 let code = transfer::run_send(
