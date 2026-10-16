@@ -38,3 +38,11 @@ make run-client
 
 ---
 *Type `exit` in the terminal to trigger a secure memory wipe and shutdown.*
+
+## Tor transport (`--onion`)
+
+`lethe --server --onion` bootstraps an embedded Tor client (arti, inside `liblethe.so`), publishes
+an onion service and prints its `.onion` address on the terminal only. The peer runs
+`lethe --onion` and types the address at the prompt (or passes `--addr`, which lands in shell
+history). Tor state/cache live on the private `tmpfs` at `/tmp`; the onion identity key is in arti's
+native keystore on that tmpfs (RAM, not disk, but not mlocked), released by `umount2` at shutdown; `noswap` needs Linux >= 6.4, otherwise a warning is shown.

@@ -84,7 +84,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str());
 
-        let addr = if let Some(a) = explicit_addr {
+        let onion = args.iter().any(|a| a == "--onion");
+
+        let addr = if onion && is_server {
+            String::new() // the onion service picks its own address
+        } else if onion {
+            match explicit_addr {
+                Some(a) => a.to_string(),
+                None => {
+                    // Never via argv/shell history by default (D13).
+                    let peer = hardening::secure_tty::read_secret(&tty, "\x1b[1;31m>\x1b[0m \x1b[1;33mPeer .onion address:\x1b[0m ")
+                        .map_err(|e| format!("cannot read peer address: {e}"))?;
+                    std::str::from_utf8(peer.as_bytes())
+                        .map_err(|_| "peer address is not UTF-8")?
+                        .trim()
+                        .to_string()
+                }
+            }
+        } else if let Some(a) = explicit_addr {
             a.to_string()
         } else if mode == mode::Mode::Chat {
             read_address_from_tty(is_server)
@@ -128,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         crate::status_ln!(
             "\x1b[1;30m[+]\x1b[0m \x1b[32mTransport: {} | Mode: {}\x1b[0m\n",
-            addr,
+            if onion { "Tor onion service" } else { addr.as_str() },
             if is_server { "SERVER" } else { "CLIENT" }
         );
 
@@ -144,12 +161,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let pw = crypto::session::stretch(passphrase.as_bytes());
         drop(passphrase); // zeroized immediately
+
+        tty.write_all(b"\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).\n");
+
+        let lib = lib_path.to_string_lossy().into_owned();
+        let transport = if onion {
+            let peer = if is_server { None } else { Some(addr.as_str()) };
+            let t = with_spinner(&tty, "Bootstrapping Tor", || {
+                TransportHandle::load_onion(&lib, is_server, peer)
+            })
+            .map_err(|e| format!("Tor transport failed: {}", e))?;
+            if is_server {
+                // The address goes to the terminal only, never to logs/stdout.
+                let a = t.onion_address().ok_or("onion address unavailable")?;
+                tty.write_all(
+                    format!("\x1b[1;30m[+]\x1b[0m Share this address out-of-band:\n    \x1b[1;32m{a}\x1b[0m\n")
+                        .as_bytes(),
+                );
+            }
+            with_spinner(&tty, if is_server { "Waiting for peer" } else { "Connecting to peer" }, || {
+                t.wait_peer()
+            })
+            .map_err(|e| format!("{}", e))?;
+            t
+        } else {
+            TransportHandle::load(&lib, is_server, &addr)
+                .map_err(|e| format!("transport init failed: {}", e))?
+        };
         drop(tty); // the core never reads the terminal again
-
-        crate::status_ln!("\x1b[1;30m[+]\x1b[0m Passphrase stretched (Argon2id).");
-
-        let transport = TransportHandle::load(&lib_path.to_string_lossy(), is_server, &addr)
-            .map_err(|e| format!("transport init failed: {}", e))?;
 
         let role = crypto::session::Role::from_is_server(is_server);
         let session_keys = {
@@ -194,6 +233,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     Ok(())
+}
+
+/// Runs `work` on this thread while a helper thread draws a spinner on the tty.
+fn with_spinner<T>(
+    tty: &hardening::secure_tty::Tty,
+    label: &str,
+    work: impl FnOnce() -> T,
+) -> T {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            let frames = ["|", "/", "-", "\\"];
+            let mut i = 0;
+            while !done.load(Ordering::SeqCst) {
+                tty.write_all(format!("\r\x1b[1;30m[{}]\x1b[0m {label}... ", frames[i % 4]).as_bytes());
+                i += 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            tty.write_all(b"\r\x1b[2K");
+        });
+        let out = work();
+        done.store(true, Ordering::SeqCst);
+        out
+    })
 }
 
 /// Reports the verdict on the tty (never stdout) and exits with its code.

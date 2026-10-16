@@ -20,6 +20,31 @@ impl TransportHandle {
         Ok(Self { syms, node_handle })
     }
 
+    /// Tor path: bootstraps and (server) publishes the service, but does not wait for a peer.
+    pub fn load_onion(
+        lib_path: &str,
+        is_server: bool,
+        peer_onion: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let syms = LoadedSymbols::open(lib_path)?;
+        let node_handle = syms.start_onion(is_server, peer_onion)?;
+        Ok(Self { syms, node_handle })
+    }
+
+    /// Server only: the `<56>.onion` address.
+    pub fn onion_address(&self) -> Option<String> {
+        self.syms.onion_address(self.node_handle)
+    }
+
+    /// Blocks until the Tor stream is established.
+    pub fn wait_peer(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.syms.wait_peer(self.node_handle) {
+            Ok(())
+        } else {
+            Err("no peer connected over Tor".into())
+        }
+    }
+
     pub fn send(&self, data: &[u8]) -> i32 {
         self.syms.send(self.node_handle, data)
     }

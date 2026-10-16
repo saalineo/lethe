@@ -18,6 +18,9 @@ pub fn secure_shutdown_with(code: i32) {
         );
 
         crate::hardening::sandbox_ui::shutdown_ui();
+        // Release the namespace's tmpfs (Tor state/cache) immediately.
+        // SAFETY: plain syscall with a valid NUL-terminated path.
+        unsafe { libc::umount2(c"/tmp".as_ptr(), libc::MNT_DETACH) };
         secure_tty::restore_saved_termios();
 
         if let Ok(mut g) = SESSION.lock() {

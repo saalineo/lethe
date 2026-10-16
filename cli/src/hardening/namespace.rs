@@ -41,13 +41,32 @@ pub fn isolate_environment() -> Result<(), &'static str> {
         let tmpfs = CString::new("tmpfs").map_err(|_| "Invalid tmpfs name")?;
         let flags = MS_NOSUID | MS_NOEXEC | MS_NODEV;
 
-        mount(
+        // RAM-only scratch space for Tor state. `noswap` (Linux >= 6.4) keeps
+        // tmpfs pages out of swap, which mlockall does not cover.
+        let hardened = CString::new("size=192m,mode=0700,noswap").map_err(|_| "Invalid tmpfs options")?;
+        let plain = CString::new("size=192m,mode=0700").map_err(|_| "Invalid tmpfs options")?;
+        if mount(
             tmpfs.as_ptr(),
             tmp_path.as_ptr(),
             tmpfs.as_ptr(),
             flags,
-            ptr::null(),
-        );
+            hardened.as_ptr() as *const _,
+        ) != 0
+        {
+            // Older kernels reject `noswap` with EINVAL: retry and warn.
+            if mount(
+                tmpfs.as_ptr(),
+                tmp_path.as_ptr(),
+                tmpfs.as_ptr(),
+                flags,
+                plain.as_ptr() as *const _,
+            ) == 0
+            {
+                crate::status_ln!(
+                    "[!] kernel lacks tmpfs `noswap`: Tor state in /tmp may be swapped"
+                );
+            }
+        }
 
         let proc_path = CString::new("/proc").map_err(|_| "Invalid proc path")?;
         let proc_fs = CString::new("proc").map_err(|_| "Invalid proc fs name")?;

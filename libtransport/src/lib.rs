@@ -9,10 +9,45 @@ use zeroize::Zeroize;
 const BUF_SIZE: usize = 32 * 1024;
 const MAX_HANDLES: usize = 64;
 
+mod onion;
+
+/// A bidirectional, framed link: the TCP path ([`Conn`]) or a Tor stream.
+pub(crate) trait Link: Send + Sync {
+    fn send(&self, data: &[u8]) -> io::Result<()>;
+    fn recv(&self) -> io::Result<Vec<u8>>;
+    fn shutdown(&self);
+}
+
+enum Slot {
+    Tcp(Arc<Conn>),
+    Onion(Arc<onion::Node>),
+}
+
+impl Slot {
+    fn link(&self) -> Arc<dyn Link> {
+        match self {
+            Slot::Tcp(c) => c.clone(),
+            Slot::Onion(n) => n.clone(),
+        }
+    }
+}
+
 struct Conn {
     rd: Mutex<TcpStream>,
     wr: Mutex<TcpStream>,
     ctl: TcpStream,
+}
+
+impl Link for Conn {
+    fn send(&self, data: &[u8]) -> io::Result<()> {
+        Conn::send(self, data)
+    }
+    fn recv(&self) -> io::Result<Vec<u8>> {
+        Conn::recv(self)
+    }
+    fn shutdown(&self) {
+        Conn::shutdown(self)
+    }
 }
 
 impl Conn {
@@ -41,10 +76,13 @@ impl Conn {
     }
 }
 
-static HANDLES: Mutex<Vec<Option<Arc<Conn>>>> = Mutex::new(Vec::new());
+static HANDLES: Mutex<Vec<Option<Slot>>> = Mutex::new(Vec::new());
 
 fn alloc_handle(stream: TcpStream) -> io::Result<c_int> {
-    let conn = Arc::new(Conn::new(stream)?);
+    alloc_slot(Slot::Tcp(Arc::new(Conn::new(stream)?)))
+}
+
+fn alloc_slot(slot: Slot) -> io::Result<c_int> {
     let mut handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
 
     let idx = match handles.iter().position(Option::is_none) {
@@ -56,7 +94,7 @@ fn alloc_handle(stream: TcpStream) -> io::Result<c_int> {
         None => return Err(io::Error::other("handle table full")),
     };
 
-    handles[idx] = Some(conn);
+    handles[idx] = Some(slot);
     Ok(idx as c_int)
 }
 
@@ -64,14 +102,26 @@ fn alloc_handle(stream: TcpStream) -> io::Result<c_int> {
 ///
 /// Crucially, the global `HANDLES` table lock is released prior to returning,
 /// preventing global contention and deadlocks during subsequent I/O.
-fn conn(handle: c_int) -> Option<Arc<Conn>> {
+fn conn(handle: c_int) -> Option<Arc<dyn Link>> {
     if handle < 0 {
         return None;
     }
     let handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
     handles
         .get(handle as usize)
-        .and_then(|slot| slot.as_ref().cloned())
+        .and_then(|slot| slot.as_ref().map(Slot::link))
+}
+
+/// The onion node behind `handle`, if it is one.
+fn onion_node(handle: c_int) -> Option<Arc<onion::Node>> {
+    if handle < 0 {
+        return None;
+    }
+    let handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
+    match handles.get(handle as usize)? {
+        Some(Slot::Onion(n)) => Some(n.clone()),
+        _ => None,
+    }
 }
 
 /// Free a handle, clearing its slot for reuse and shutting down socket I/O.
@@ -90,7 +140,7 @@ fn free_handle(handle: c_int) {
     };
 
     if let Some(c) = conn {
-        c.shutdown();
+        c.link().shutdown();
     }
 }
 
@@ -202,6 +252,76 @@ fn start_server(addr: &str) -> io::Result<c_int> {
 fn start_client(addr: &str) -> io::Result<c_int> {
     let stream = TcpStream::connect(addr)?;
     alloc_handle(stream)
+}
+
+/// Bootstrap Tor and (for a server) publish an onion service. Never blocks on
+/// a peer; follow with `OnionAddress` and `WaitPeer`.
+///
+/// # Safety
+///
+/// `peer_onion` must be null or a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn StartOnion(is_server: c_int, peer_onion: *const c_char) -> c_int {
+    std::panic::catch_unwind(|| {
+        // SAFETY: Delegating to `cstr_to_str` which verifies nullness.
+        let peer = unsafe { cstr_to_str(peer_onion) }.map(|s| s.trim().to_string());
+        let node = match onion::Node::start(is_server != 0, peer) {
+            Ok(n) => n,
+            Err(_) => return -1,
+        };
+        alloc_slot(Slot::Onion(node)).unwrap_or(-1)
+    })
+    .unwrap_or(-1)
+}
+
+/// Server only: writes the NUL-terminated `<56 chars>.onion` address into
+/// `out` and returns its length, or -1.
+///
+/// # Safety
+///
+/// `out` must point to `cap` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn OnionAddress(handle: c_int, out: *mut c_uchar, cap: c_int) -> c_int {
+    std::panic::catch_unwind(|| {
+        if cap <= 0 {
+            return -1;
+        }
+        // SAFETY: Delegating to `slice_from_ptr_mut`.
+        let dst = match unsafe { slice_from_ptr_mut(out, cap as usize) } {
+            Some(d) => d,
+            None => return -1,
+        };
+        let node = match onion_node(handle) {
+            Some(n) => n,
+            None => return -1,
+        };
+        match node.address() {
+            Some(a) if a.len() < dst.len() => {
+                dst[..a.len()].copy_from_slice(a.as_bytes());
+                dst[a.len()] = 0;
+                a.len() as c_int
+            }
+            _ => -1,
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// Blocks until the Tor stream is up. Returns 0, or -1 on failure/timeout.
+///
+/// # Safety
+///
+/// `handle` must come from `StartOnion`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn WaitPeer(handle: c_int) -> c_int {
+    std::panic::catch_unwind(|| match onion_node(handle) {
+        Some(n) => match n.wait_peer() {
+            Ok(()) => 0,
+            Err(_) => -1,
+        },
+        None => -1,
+    })
+    .unwrap_or(-1)
 }
 
 /// Send a frame of data over the given node handle.
