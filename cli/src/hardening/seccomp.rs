@@ -24,6 +24,8 @@ pub fn enforce(profile: Profile) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+// ioctl request constants are c_ulong, which is u64 only on LP64 targets.
+#[allow(clippy::unnecessary_cast)]
 fn ui_profile(ipc_fd: i32, tty_fd: i32) -> Result<ScmpFilterContext, Box<dyn std::error::Error>> {
     let mut c = ScmpFilterContext::new_filter(ScmpAction::KillProcess)?;
 
@@ -135,7 +137,6 @@ pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         libc::SYS_getgid as i32,
         libc::SYS_geteuid as i32,
         libc::SYS_getegid as i32,
-        libc::SYS_ptrace as i32,
         libc::SYS_poll as i32,
         libc::SYS_ppoll as i32,
         libc::SYS_select as i32,
@@ -149,7 +150,6 @@ pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         libc::SYS_getppid as i32,
         libc::SYS_arch_prctl as i32,
         libc::SYS_sched_getaffinity as i32,
-        libc::SYS_socket as i32,
         libc::SYS_connect as i32,
         libc::SYS_bind as i32,
         libc::SYS_listen as i32,
@@ -226,6 +226,15 @@ pub fn enforce_syscall_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         let _ = isolation_context.add_rule(ScmpAction::Allow, kernel_syscall);
     }
 
+    // Sockets: only IP (Tor / TCP) and local (UI IPC) domains.
+    for domain in [libc::AF_INET, libc::AF_INET6, libc::AF_UNIX] {
+        isolation_context.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from(libc::SYS_socket as i32),
+            &[ScmpArgCompare::new(0, ScmpCompareOp::Equal, domain as u64)],
+        )?;
+    }
+
     isolation_context.load()?;
     Ok(())
 }
@@ -280,6 +289,43 @@ mod tests {
 
         let st = run_sandboxed(|_, _| unsafe {
             libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        });
+        assert!(libc::WIFSIGNALED(st), "status {st}");
+    }
+
+    /// Forks, loads the Core profile in the child and runs `body`; returns the wait status.
+    fn run_core(body: fn()) -> i32 {
+        // SAFETY: plain libc calls; the child only makes raw syscalls.
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                if enforce(Profile::Core).is_err() {
+                    libc::_exit(90);
+                }
+                body();
+                libc::_exit(0);
+            }
+            let mut st = 0;
+            libc::waitpid(pid, &mut st, 0);
+            st
+        }
+    }
+
+    #[test]
+    fn core_profile_limits_socket_domains_and_drops_ptrace() {
+        let st = run_core(|| unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            libc::close(fd);
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "status {st}");
+
+        let st = run_core(|| unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, 0);
+        });
+        assert!(libc::WIFSIGNALED(st), "status {st}");
+
+        let st = run_core(|| unsafe {
+            libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0);
         });
         assert!(libc::WIFSIGNALED(st), "status {st}");
     }

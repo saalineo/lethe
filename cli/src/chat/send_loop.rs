@@ -106,10 +106,10 @@ mod tests {
             times.push(Instant::now());
             let f = crate::proto::cell::decode(&mut chain, &buf).unwrap();
             kinds.push(f.kind);
-            if f.kind != Kind::Noise {
-                if let Some(m) = asm.push(f).unwrap() {
-                    got = Some(m);
-                }
+            if f.kind != Kind::Noise
+                && let Some(m) = asm.push(f).unwrap()
+            {
+                got = Some(m);
             }
         }
         assert_eq!(got, Some((Kind::Chat, msg)));

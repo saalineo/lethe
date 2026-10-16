@@ -68,7 +68,9 @@ pub fn run(
 }
 
 /// Chat mode: hands each reassembled message to `sink`; any end is a shutdown.
-pub fn spawn(transport: Arc<TransportHandle>, sink: Arc<dyn Fn(&[u8]) + Send + Sync>) {
+pub type Sink = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+pub fn spawn(transport: Arc<TransportHandle>, sink: Sink) {
     thread::spawn(move || {
         let mut asm = Reassembler::new();
         let end = run(&transport, &crate::crypto::secret::GlobalSession, |frag| {

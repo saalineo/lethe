@@ -57,11 +57,8 @@ fn chat_text(alias: &str, line: &[u8]) -> Vec<u8> {
 fn pump_ui(mut ui: UnixStream, queue: SyncSender<Frag>, gate: Arc<Mutex<Gate>>) {
     let mut buf = [0u8; MAX_FRAME];
     let mut alias: Option<String> = None;
-    loop {
-        let (tag, n) = match ipc::recv(&mut ui, &mut buf) {
-            Ok(v) => v,
-            Err(_) => break, // UI exited or died
-        };
+    // `recv` fails when the UI exited or died.
+    while let Ok((tag, n)) = ipc::recv(&mut ui, &mut buf) {
         match tag {
             t if t == UiToCore::Hello as u8 => {
                 if alias.is_none() {
